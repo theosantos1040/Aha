@@ -204,6 +204,10 @@ def is_banned(chat, jid):
     return bool(_exec("SELECT 1 FROM banlist WHERE chat=? AND jid=?", (chat, jid), "one"))
 
 
+def remove_ban(chat, jid):
+    _exec("DELETE FROM banlist WHERE chat=? AND jid=?", (chat, jid))
+
+
 # ---------- lembretes ----------
 def add_reminder(chat, jid, text, due):
     return _exec("INSERT INTO reminders(chat, jid, text, due) VALUES(?,?,?,?)",

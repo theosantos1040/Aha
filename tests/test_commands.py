@@ -108,7 +108,7 @@ def run(text, admin=True, mentions=None, is_group=True):
 def test_utility_commands():
     assert "4" in run("/calc 2+2").sent[0]
     assert "Pong" in run("/ping").sent[0]
-    assert "Painel" in run("/help").sent[0]
+    assert "Menu" in run("/help").sent[0]
     assert "Online" in run("/uptime").sent[0]
     assert "Clima" in run("/weather Lisboa").sent[0]
     assert run("/userinfo").sent
@@ -138,6 +138,12 @@ def test_admin_commands():
     w = run("/warn 5511888888888 spam")
     assert "Advertência" in w.sent[0]
     assert "Advertências" in run("/checkwarns 5511888888888").sent[0]
+    # ban + unban
+    run("/ban 5511888888888")
+    assert database.is_banned(bot.Jid2String(GROUP), "5511888888888")
+    unb = run("/unban 5511888888888")
+    assert "banlist" in unb.sent[0]
+    assert not database.is_banned(bot.Jid2String(GROUP), "5511888888888")
     # kick chama update_group_participants
     assert any(a[0] == "participants" for a in run("/kick 5511888888888").actions)
     # setprefix

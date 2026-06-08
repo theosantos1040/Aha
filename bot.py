@@ -141,6 +141,17 @@ def cmd_ban(ctx):
         ctx.reply(f"⚠️ Adicionado à banlist, mas não consegui remover agora: {exc}")
 
 
+def cmd_unban(ctx):
+    if not ctx.require_admin():
+        return
+    target = ctx.target_jid_str()
+    if not target:
+        return ctx.reply("Marque alguém. Uso: /unban @usuario")
+    phone = short_jid(target)
+    db.remove_ban(ctx.chat_str, phone)
+    ctx.reply(f"✅ @{phone} removido da *banlist*. Pode voltar ao grupo.")
+
+
 def cmd_kick(ctx):
     if not ctx.require_admin():
         return
@@ -344,21 +355,24 @@ def cmd_ping(ctx):
 
 def cmd_help(ctx):
     p = ctx.prefix
-    ctx.reply(
-        f"📜 *{config.BOT_NAME} — Painel de Comandos*\n\n"
-        f"👮 *Administração*\n"
-        f"{p}ttkvd {p}ban {p}kick {p}mute {p}unmute {p}clear {p}lock {p}unlock "
-        f"{p}warn {p}checkwarns {p}setprefix {p}addrole {p}removerole {p}slowmode "
-        f"{p}announce {p}nuke\n\n"
-        f"🛠️ *Gerais & Utilitários*\n"
-        f"{p}IA {p}ping {p}help {p}userinfo {p}serverinfo {p}avatar {p}calc {p}weather "
-        f"{p}translate {p}remind {p}poll {p}afk {p}invite {p}uptime {p}report {p}suggest "
-        f"{p}level {p}leaderboard {p}daily {p}balance {p}pay\n\n"
-        f"🎮 *Jogos & Brincadeiras*\n"
-        f"{p}coinflip {p}jokenpo {p}8ball {p}roll {p}tictactoe {p}trivia {p}hangman "
-        f"{p}akinator {p}russianroulette {p}ship\n\n"
-        f"_IA com modelos: {', '.join(config.AI_MODELS)}_"
+    help_text = (
+        f"📜 *{config.BOT_NAME} — Menu Completo de Comandos*\n\n"
+        f"👮 *Administração (17)*\n"
+        f"└─ {p}ban {p}unban {p}kick {p}mute {p}unmute {p}warn {p}checkwarns\n"
+        f"   {p}lock {p}unlock {p}announce {p}clear {p}nuke {p}ttkvd\n"
+        f"   {p}setprefix {p}addrole {p}removerole {p}slowmode\n\n"
+        f"🛠️ *Gerais & Utilitários (21)*\n"
+        f"└─ {p}IA {p}ping {p}help {p}userinfo {p}serverinfo {p}avatar\n"
+        f"   {p}calc {p}weather {p}translate {p}remind {p}poll {p}afk\n"
+        f"   {p}invite {p}uptime {p}report {p}suggest {p}level\n"
+        f"   {p}leaderboard {p}daily {p}balance {p}pay\n\n"
+        f"🎮 *Jogos & Brincadeiras (10)*\n"
+        f"└─ {p}coinflip {p}jokenpo {p}8ball {p}roll {p}tictactoe\n"
+        f"   {p}trivia {p}hangman {p}akinator {p}russianroulette {p}ship\n\n"
+        f"*IA: /IA [chatgpt|nex|glm] <pergunta>*\n"
+        f"_Prefixo: {p} | Modelos: {', '.join(config.AI_MODELS)}_"
     )
+    ctx.reply(help_text)
 
 
 def cmd_userinfo(ctx):
@@ -673,7 +687,7 @@ def cmd_akinator(ctx):
 
 # ===================== ROTEADOR =====================
 COMMANDS = {
-    "ttkvd": cmd_ttkvd, "ban": cmd_ban, "kick": cmd_kick, "mute": cmd_mute,
+    "ttkvd": cmd_ttkvd, "ban": cmd_ban, "unban": cmd_unban, "kick": cmd_kick, "mute": cmd_mute,
     "unmute": cmd_unmute, "clear": cmd_clear, "lock": cmd_lock, "unlock": cmd_unlock,
     "warn": cmd_warn, "checkwarns": cmd_checkwarns, "setprefix": cmd_setprefix,
     "addrole": cmd_addrole, "removerole": cmd_removerole, "slowmode": cmd_slowmode,
