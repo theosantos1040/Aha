@@ -1,0 +1,23 @@
+# Ambiente / segredos
+.env
+*.env
+!.env.example
+
+# Sessão do WhatsApp (NUNCA commitar)
+*.sqlite3
+*.sqlite3-*
+session*.db
+db.sqlite3
+bot_data.sqlite3
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Downloads temporários
+downloads/
+*.mp4
+*.log
