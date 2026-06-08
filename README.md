@@ -1,1 +1,134 @@
-# Aha
+# 🤖 ThzyxBoTS — Bot de WhatsApp com IA
+
+Bot de WhatsApp em **Python** com inteligência artificial (via **OpenRouter**) e
+**47 comandos** divididos em Administração, Utilitários e Jogos.
+
+> Transporte: [`neonize`](https://github.com/krypton-byte/neonize) (binding do
+> `whatsmeow`, WhatsApp **multidevice** — sem precisar de navegador aberto).
+
+---
+
+## ⚡ Instalação rápida
+
+```bash
+# 1. Instalar dependências
+pip install -r requirements.txt
+
+# 2. Configurar
+cp .env.example .env
+# edite o .env e coloque sua OPENROUTER_API_KEY
+
+# 3. Rodar (vai aparecer um QR code no terminal)
+python run.py
+```
+
+Abra o **WhatsApp > Aparelhos conectados > Conectar um aparelho** e escaneie o
+QR code que aparece no terminal. Pronto — o bot fica online.
+
+---
+
+## 🔑 Configuração (`.env`)
+
+| Variável | Descrição |
+|---|---|
+| `OPENROUTER_API_KEY` | Sua chave do [OpenRouter](https://openrouter.ai/keys) |
+| `BOT_NAME` | Nome da IA (padrão: `ThzyxBoTS`) |
+| `DEFAULT_PREFIX` | Prefixo dos comandos (padrão: `/`) |
+| `SESSION_DB` | Arquivo da sessão do WhatsApp |
+| `DATA_DB` | Banco de dados do bot (economia, XP, etc.) |
+| `OWNERS` | (opcional) números de donos globais, separados por vírgula |
+
+> ⚠️ **Segurança:** sua chave foi compartilhada em texto puro. **Gere uma nova**
+> em https://openrouter.ai/keys e nunca a coloque dentro do código ou em
+> arquivos versionados. O `.env` já está no `.gitignore`.
+
+---
+
+## 🧠 IA — comando `/IA`
+
+Três modelos gratuitos, **testados de verdade (HTTP 200)**:
+
+| Apelido | Modelo OpenRouter |
+|---|---|
+| `chatgpt` | `openai/gpt-oss-120b:free` (padrão, rápido) |
+| `nex` | `nex-agi/nex-n2-pro:free` |
+| `glm` | `z-ai/glm-4.5-air:free` |
+
+```
+/IA Quem descobriu o Brasil?
+/IA chatgpt Explique buracos negros
+/IA nex Escreva um poema
+```
+
+> Observação: o modelo `sourceful/riverflow-v2.5-pro:free` que você citou **não
+> existe** no OpenRouter, por isso foi substituído pelo `z-ai/glm-4.5-air:free`.
+> O cliente de IA faz **retry automático** (429/5xx/timeout) e troca de modelo
+> caso um falhe.
+
+---
+
+## 📜 Comandos
+
+### 👮 Administração (16)
+`/ttkvd` (baixa vídeo do TikTok) · `/ban` · `/kick` · `/mute` · `/unmute` ·
+`/clear` · `/lock` · `/unlock` · `/warn` · `/checkwarns` · `/setprefix` ·
+`/addrole` · `/removerole` · `/slowmode` · `/announce` · `/nuke`
+
+### 🛠️ Gerais & Utilitários (21)
+`/IA` · `/ping` · `/help` · `/userinfo` · `/serverinfo` · `/avatar` · `/calc` ·
+`/weather` · `/translate` · `/remind` · `/poll` · `/afk` · `/invite` ·
+`/uptime` · `/report` · `/suggest` · `/level` · `/leaderboard` · `/daily` ·
+`/balance` · `/pay`
+
+### 🎮 Jogos & Brincadeiras (10)
+`/coinflip` · `/jokenpo` · `/8ball` · `/roll` · `/tictactoe` · `/trivia` ·
+`/hangman` · `/akinator` · `/russianroulette` · `/ship`
+
+---
+
+## ⚠️ WhatsApp ≠ Discord (limitações reais)
+
+A lista original tinha conceitos de **Discord** que o WhatsApp não suporta da
+mesma forma. O que foi adaptado:
+
+| Comando | Comportamento no WhatsApp |
+|---|---|
+| `/ban` | Remove do grupo **+ banlist**: se voltar, é removido automaticamente |
+| `/kick` | Remove o participante (precisa o bot ser admin) |
+| `/lock` `/unlock` | Usa o modo "só admins enviam" (nativo do WhatsApp) |
+| `/mute` `/slowmode` | Registrados pelo bot — o WhatsApp **não** permite impedir o envio de terceiros |
+| `/clear` `/nuke` | O WhatsApp **não** permite apagar mensagens de outros nem clonar chats via API |
+| `/addrole` `/removerole` | Cargos a nível de bot; `role=admin` promove/rebaixa de verdade |
+
+Tudo o que é possível na API foi implementado; o resto é registrado pelo bot e
+documentado de forma honesta nas respostas.
+
+---
+
+## ✅ Testes
+
+```bash
+python tests/test_logic.py     # calc, jogos, economia, DB (offline)
+python tests/test_commands.py  # todos os comandos com cliente WhatsApp mock
+python tests/test_ai.py        # IA AO VIVO — confirma HTTP 200 nos 3 modelos
+```
+
+Todos passam. Os testes de comando usam um cliente WhatsApp **falso**, então
+rodam sem precisar de conta/QR.
+
+---
+
+## 📁 Estrutura
+
+```
+run.py          # ponto de entrada
+bot.py          # eventos + handlers de todos os comandos (neonize)
+ai.py           # cliente OpenRouter (retry + fallback de modelo/reasoning)
+database.py     # SQLite: economia, XP, warns, AFK, prefixo, banlist...
+games.py        # lógica pura dos jogos
+utils.py        # calc seguro, parsing de duração, formatação
+services.py     # clima (wttr.in) e tradução (Google + fallback IA)
+tiktok.py       # download de vídeos (tikwm.com)
+config.py       # configuração via .env
+tests/          # suíte de testes
+```
