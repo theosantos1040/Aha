@@ -1,0 +1,18 @@
+# segredos e sessão — NUNCA vão para a imagem
+.env
+*.env
+!.env.example
+*.sqlite3
+*.sqlite3-*
+session*.db
+
+# lixo de build/local
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.git/
+downloads/
+*.mp4
+*.log
+tests/

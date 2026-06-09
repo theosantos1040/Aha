@@ -1,0 +1,37 @@
+# Blueprint do Render para o ThzyxBoTS
+# Importe este repositório em https://dashboard.render.com/blueprints
+#
+# IMPORTANTE: um bot de WhatsApp precisa de conexão SEMPRE ATIVA e de um
+# disco que sobreviva a reinícios (para não reparear toda hora). Por isso é
+# um "worker" (não "web") com um "disk". Isso exige o plano pago (Starter).
+services:
+  - type: worker
+    name: thzyxbots
+    runtime: docker
+    plan: starter            # worker + disco exigem plano pago (~US$7/mês)
+    dockerfilePath: ./Dockerfile
+    autoDeploy: true
+    disk:
+      name: thzyx-data       # sessão do WhatsApp + banco do bot persistem aqui
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      # caminhos no disco persistente
+      - key: SESSION_DB
+        value: /data/session.sqlite3
+      - key: DATA_DB
+        value: /data/bot_data.sqlite3
+      # login automático por CÓDIGO (sem terminal interativo no Render)
+      - key: LOGIN_METHOD
+        value: code
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      # >>> defina estes no painel do Render (Environment), NÃO commite <<<
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: PHONE_NUMBER       # seu número: DDI+DDD+numero, só dígitos
+        sync: false
+      - key: BOT_NAME
+        sync: false
+      - key: OWNERS
+        sync: false
