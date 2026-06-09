@@ -7,14 +7,16 @@ import random
 import threading
 import time
 
+import neonize.proto.Neonize_pb2 as N
 from neonize.client import NewClient
-from neonize.events import ConnectedEv, MessageEv, PairStatusEv
+from neonize.events import ConnectedEv, GroupInfoEv, MessageEv, PairStatusEv
 from neonize.utils.enum import ParticipantChange, VoteType
 from neonize.utils.jid import build_jid, Jid2String
 
 import config
 import database as db
 import games
+import media
 import services
 import tiktok
 import utils
@@ -51,6 +53,37 @@ def get_mentions(message):
 def parse_jid(jid_str: str):
     user, _, server = jid_str.partition("@")
     return build_jid(user, server or "s.whatsapp.net")
+
+
+def _media_kind(inner) -> str:
+    """Descobre o tipo de mídia presente numa Message interna (waE2E)."""
+    if inner.videoMessage.URL or inner.videoMessage.mediaKey:
+        return "video"
+    if inner.imageMessage.URL or inner.imageMessage.mediaKey:
+        return "image"
+    if inner.audioMessage.URL or inner.audioMessage.mediaKey:
+        return "audio"
+    return ""
+
+
+def get_media(message):
+    """Retorna (bytes, tipo) da mídia da própria mensagem ou da mensagem citada.
+
+    Permite usar /fg e /va tanto enviando a mídia com o comando na legenda
+    quanto respondendo a uma mídia.
+    """
+    inner = message.Message
+    kind = _media_kind(inner)
+    if kind:
+        return client.download_any(message), kind
+    # tenta a mensagem citada (respondida)
+    quoted = inner.extendedTextMessage.contextInfo.quotedMessage
+    qkind = _media_kind(quoted)
+    if qkind:
+        wrapper = N.Message()
+        wrapper.Message.CopyFrom(quoted)
+        return client.download_any(wrapper), qkind
+    return None, ""
 
 
 def short_jid(jid_str: str) -> str:
@@ -139,6 +172,17 @@ def cmd_ban(ctx):
         ctx.reply(f"🔨 @{short_jid(target)} foi *banido* permanentemente.")
     except Exception as exc:
         ctx.reply(f"⚠️ Adicionado à banlist, mas não consegui remover agora: {exc}")
+
+
+def cmd_unban(ctx):
+    if not ctx.require_admin():
+        return
+    target = ctx.target_jid_str()
+    if not target:
+        return ctx.reply("Marque alguém. Uso: /unban @usuario")
+    phone = short_jid(target)
+    db.remove_ban(ctx.chat_str, phone)
+    ctx.reply(f"✅ @{phone} removido da *banlist*. Pode voltar ao grupo.")
 
 
 def cmd_kick(ctx):
@@ -302,6 +346,21 @@ def cmd_nuke(ctx):
     )
 
 
+def cmd_welcome(ctx):
+    if not ctx.require_admin():
+        return
+    arg = (ctx.parts[0].lower() if ctx.parts else "")
+    if arg in ("on", "ativar", "ligar", "sim"):
+        db.set_setting(ctx.chat_str, "welcome", "1")
+        ctx.reply(f"💖 Boas-vindas *ativadas*! {config.DECO_TOP}\nNovos membros serão recebidos com foto e mensagem fofa.")
+    elif arg in ("off", "desativar", "desligar", "nao", "não"):
+        db.set_setting(ctx.chat_str, "welcome", "0")
+        ctx.reply("🚪 Boas-vindas *desativadas*.")
+    else:
+        status = "ativadas ✅" if db.get_setting(ctx.chat_str, "welcome") == "1" else "desativadas ❌"
+        ctx.reply(f"Uso: /welcome on  |  /welcome off\nStatus atual: {status}")
+
+
 # ===================== GERAIS / UTILITÁRIOS =====================
 def cmd_ia(ctx):
     if not ctx.args:
@@ -323,7 +382,7 @@ def cmd_ia(ctx):
         pass
     try:
         answer = ai_chat(prompt, model_key)
-        ctx.reply(f"🤖 *{config.BOT_NAME}* ({model_key}):\n\n{answer}")
+        ctx.reply(f"{config.DECO_NAME} ({model_key})\n{config.DECO_LINE}\n\n{answer}")
     except AIError as exc:
         ctx.reply(f"❌ IA indisponível: {exc}")
 
@@ -344,21 +403,31 @@ def cmd_ping(ctx):
 
 def cmd_help(ctx):
     p = ctx.prefix
-    ctx.reply(
-        f"📜 *{config.BOT_NAME} — Painel de Comandos*\n\n"
-        f"👮 *Administração*\n"
-        f"{p}ttkvd {p}ban {p}kick {p}mute {p}unmute {p}clear {p}lock {p}unlock "
-        f"{p}warn {p}checkwarns {p}setprefix {p}addrole {p}removerole {p}slowmode "
-        f"{p}announce {p}nuke\n\n"
-        f"🛠️ *Gerais & Utilitários*\n"
-        f"{p}IA {p}ping {p}help {p}userinfo {p}serverinfo {p}avatar {p}calc {p}weather "
-        f"{p}translate {p}remind {p}poll {p}afk {p}invite {p}uptime {p}report {p}suggest "
-        f"{p}level {p}leaderboard {p}daily {p}balance {p}pay\n\n"
-        f"🎮 *Jogos & Brincadeiras*\n"
-        f"{p}coinflip {p}jokenpo {p}8ball {p}roll {p}tictactoe {p}trivia {p}hangman "
-        f"{p}akinator {p}russianroulette {p}ship\n\n"
-        f"_IA com modelos: {', '.join(config.AI_MODELS)}_"
+    help_text = (
+        f"{config.DECO_TOP}\n"
+        f"📜 *{config.BOT_NAME} — Menu Completo*\n"
+        f"{config.DECO_LINE}\n\n"
+        f"👮 *Administração (19)*\n"
+        f"└─ {p}ban {p}unban {p}kick {p}mute {p}unmute {p}warn {p}checkwarns\n"
+        f"   {p}lock {p}unlock {p}announce {p}clear {p}nuke {p}ttkvd\n"
+        f"   {p}welcome {p}setprefix {p}addrole {p}removerole {p}slowmode\n\n"
+        f"🛠️ *Gerais & Utilitários (23)*\n"
+        f"└─ {p}IA {p}ping {p}help {p}userinfo {p}serverinfo {p}avatar\n"
+        f"   {p}fg {p}va {p}calc {p}weather {p}translate {p}remind {p}poll\n"
+        f"   {p}afk {p}invite {p}uptime {p}report {p}suggest {p}level\n"
+        f"   {p}leaderboard {p}daily {p}balance {p}pay\n\n"
+        f"🎮 *Jogos & Brincadeiras (10)*\n"
+        f"└─ {p}coinflip {p}jokenpo {p}8ball {p}roll {p}tictactoe\n"
+        f"   {p}trivia {p}hangman {p}akinator {p}russianroulette {p}ship\n\n"
+        f"✨ *Destaques:*\n"
+        f"• {p}IA [chatgpt|nex|glm] <pergunta> — converse com a IA 🤖\n"
+        f"• {p}fg — vídeo/imagem vira figurinha 🖼️\n"
+        f"• {p}va — vídeo vira áudio 🎵\n"
+        f"• {p}welcome on — boas-vindas com foto 💖\n\n"
+        f"{config.DECO_LINE}\n"
+        f"_Prefixo: {p} | {config.DECO_NAME}_"
     )
+    ctx.reply(help_text)
 
 
 def cmd_userinfo(ctx):
@@ -406,6 +475,51 @@ def cmd_avatar(ctx):
             ctx.reply("❌ Esse usuário não tem foto de perfil ou ela é privada.")
     except Exception as exc:
         ctx.reply(f"❌ Não consegui obter o avatar: {exc}")
+
+
+def cmd_fg(ctx):
+    """Cria figurinha a partir de imagem ou vídeo (enviado ou citado)."""
+    try:
+        data, kind = get_media(ctx.msg)
+    except Exception as exc:
+        return ctx.reply(f"❌ Não consegui baixar a mídia: {exc}")
+    if not data or kind not in ("image", "video"):
+        return ctx.reply(
+            "🖼️ Envie uma *imagem* ou *vídeo* com a legenda /fg, "
+            "ou responda a uma mídia com /fg."
+        )
+    ctx.reply("✨ Criando sua figurinha...")
+    try:
+        client.send_sticker(
+            ctx.chat, data,
+            name=config.BOT_NAME, packname=config.BOT_NAME,
+            animated_gif=(kind == "video"),
+        )
+    except Exception as exc:
+        ctx.reply(
+            f"❌ Erro ao criar figurinha: {exc}\n"
+            "_Para figurinhas de vídeo é preciso ffmpeg: pkg install ffmpeg -y_"
+        )
+
+
+def cmd_va(ctx):
+    """Converte um vídeo em áudio (mp3)."""
+    try:
+        data, kind = get_media(ctx.msg)
+    except Exception as exc:
+        return ctx.reply(f"❌ Não consegui baixar a mídia: {exc}")
+    if not data or kind != "video":
+        return ctx.reply(
+            "🎵 Envie um *vídeo* com a legenda /va, ou responda a um vídeo com /va."
+        )
+    ctx.reply("🎧 Convertendo vídeo em áudio...")
+    try:
+        audio = media.video_to_audio(data)
+        client.send_audio(ctx.chat, audio, ptt=False)
+    except media.MediaError as exc:
+        ctx.reply(f"❌ {exc}")
+    except Exception as exc:
+        ctx.reply(f"❌ Erro ao converter: {exc}")
 
 
 def cmd_calc(ctx):
@@ -673,13 +787,14 @@ def cmd_akinator(ctx):
 
 # ===================== ROTEADOR =====================
 COMMANDS = {
-    "ttkvd": cmd_ttkvd, "ban": cmd_ban, "kick": cmd_kick, "mute": cmd_mute,
+    "ttkvd": cmd_ttkvd, "ban": cmd_ban, "unban": cmd_unban, "kick": cmd_kick, "mute": cmd_mute,
     "unmute": cmd_unmute, "clear": cmd_clear, "lock": cmd_lock, "unlock": cmd_unlock,
     "warn": cmd_warn, "checkwarns": cmd_checkwarns, "setprefix": cmd_setprefix,
     "addrole": cmd_addrole, "removerole": cmd_removerole, "slowmode": cmd_slowmode,
-    "announce": cmd_announce, "nuke": cmd_nuke,
+    "announce": cmd_announce, "nuke": cmd_nuke, "welcome": cmd_welcome,
     "ia": cmd_ia, "ping": cmd_ping, "help": cmd_help, "userinfo": cmd_userinfo,
-    "serverinfo": cmd_serverinfo, "avatar": cmd_avatar, "calc": cmd_calc,
+    "serverinfo": cmd_serverinfo, "avatar": cmd_avatar, "fg": cmd_fg, "va": cmd_va,
+    "calc": cmd_calc,
     "weather": cmd_weather, "translate": cmd_translate, "remind": cmd_remind,
     "poll": cmd_poll, "afk": cmd_afk, "invite": cmd_invite, "uptime": cmd_uptime,
     "report": cmd_report, "suggest": cmd_suggest, "level": cmd_level,
@@ -719,6 +834,45 @@ def on_connected(_, __):
 @client.event(PairStatusEv)
 def on_pair(_, message):
     print(f"🔗 Pareado como: {message.ID.User}")
+
+
+@client.event(GroupInfoEv)
+def on_group_change(_, event):
+    """Dá boas-vindas a novos membros (se /welcome estiver ativado)."""
+    try:
+        joined = list(event.Join)
+    except Exception:
+        joined = []
+    if not joined:
+        return
+    chat = event.JID
+    chat_str = Jid2String(chat)
+    if db.get_setting(chat_str, "welcome") != "1":
+        return
+    for member in joined:
+        member_str = Jid2String(member)
+        phone = short_jid(member_str)
+        caption = (
+            f"{config.DECO_TOP}\n"
+            f"💖 *Bem-vindo(a)*, @{phone}! 🎉✨\n"
+            f"{config.DECO_LINE}\n"
+            f"Seja muito bem-vindo(a) ao grupo! 🥰🌸\n"
+            f"Use /help para ver tudo que eu faço 🤖💕\n"
+            f"{config.DECO_NAME}"
+        )
+        try:
+            pic = client.get_profile_picture(member)
+            if pic and pic.URL:
+                import requests
+                img = requests.get(pic.URL, timeout=30).content
+                client.send_image(chat, img, caption=caption)
+            else:
+                client.send_message(chat, caption)
+        except Exception:
+            try:
+                client.send_message(chat, caption)
+            except Exception:
+                pass
 
 
 @client.event(MessageEv)

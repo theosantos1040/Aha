@@ -1,12 +1,40 @@
 """Configuração central do ThzyxBoTS."""
 import os
 
+
+def _load_env_manual():
+    """Lê o arquivo .env sem depender do pacote python-dotenv.
+
+    No Termux é comum o python-dotenv não instalar; este fallback garante
+    que a chave da IA seja carregada mesmo assim.
+    """
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if not os.path.exists(env_path):
+        return
+    try:
+        with open(env_path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                # não sobrescreve variáveis já definidas no ambiente
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    except Exception:
+        pass
+
+
+# 1) tenta o python-dotenv (se instalado); 2) fallback manual sempre roda
 try:
     from dotenv import load_dotenv
 
     load_dotenv()
 except Exception:  # pragma: no cover - dotenv é opcional em runtime
     pass
+_load_env_manual()
 
 BOT_NAME = os.getenv("BOT_NAME", "ThzyxBoTS")
 DEFAULT_PREFIX = os.getenv("DEFAULT_PREFIX", "/")
@@ -35,3 +63,8 @@ START_BALANCE = 100
 
 # XP por mensagem
 XP_PER_MESSAGE = 10
+
+# Símbolos decorativos do bot 🌸
+DECO_TOP = "𓊆ྀི❤︎𓊇 ◡̈"
+DECO_LINE = "•︡ᯅ•︠ ────────── •︡ᯅ•︠"
+DECO_NAME = f"𓊆ྀི {BOT_NAME} ❤︎𓊇 ◡̈"
