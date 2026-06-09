@@ -46,8 +46,29 @@ cp .env.example .env
 python run.py
 ```
 
-Abra o **WhatsApp > Aparelhos conectados > Conectar um aparelho** e escaneie o
-QR code que aparece no terminal. Pronto — o bot fica online.
+### 🔑 Login por código (recomendado) ou QR
+
+Ao rodar `python run.py`, o bot pergunta como conectar:
+
+```
+🚀 ThzyxBoTS — como deseja conectar?
+  [1] Código de pareamento (digitar o número)  ← recomendado
+  [2] QR Code
+```
+
+- **Opção 1 (código):** digite seu número com DDI+DDD (ex: `5511999999999`).
+  O bot mostra um código tipo `ABCD-1234`. No celular:
+  **WhatsApp > Aparelhos conectados > Conectar um aparelho >
+  Conectar com número de telefone** e digite o código.
+- **Opção 2 (QR):** escaneie o QR code que aparece no terminal.
+
+Para pular a pergunta, defina no `.env`:
+```
+LOGIN_METHOD=code
+PHONE_NUMBER=5511999999999
+```
+
+A sessão fica salva — nas próximas vezes ele conecta sozinho.
 
 ---
 

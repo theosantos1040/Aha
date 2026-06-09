@@ -4,6 +4,7 @@ Transporte: neonize (binding do whatsmeow, WhatsApp multidevice).
 Execute com:  python run.py   (escaneie o QR com o WhatsApp)
 """
 import json
+import os
 import random
 import re
 import threading
@@ -1288,13 +1289,89 @@ def reminder_loop():
         time.sleep(15)
 
 
+def _normalize_number(raw: str) -> str:
+    """Mantém apenas dígitos (formato esperado: DDI+DDD+numero, ex: 5511999999999)."""
+    return "".join(c for c in (raw or "") if c.isdigit())
+
+
+def _print_pair_code(code: str):
+    print("\n" + "═" * 44)
+    print("  🔑 CÓDIGO DE PAREAMENTO ".center(44))
+    print("═" * 44)
+    pretty = f"{code[:4]}-{code[4:]}" if len(code) == 8 else code
+    print(f"\n        👉  {pretty}  👈\n")
+    print("  No WhatsApp do celular:")
+    print("  Aparelhos conectados > Conectar um aparelho")
+    print("  > Conectar com número de telefone > digite o código")
+    print("═" * 44 + "\n")
+
+
+def connect_with_paircode(number: str):
+    """Conecta usando código de pareamento (em vez de QR)."""
+    number = _normalize_number(number)
+    # esconde a saída do QR para não confundir o usuário
+    try:
+        client.event.qr(lambda *a, **k: None)
+    except Exception:
+        pass
+    t = threading.Thread(target=client.connect, daemon=True)
+    t.start()
+
+    # se já existe sessão salva, conecta direto (sem pedir código)
+    time.sleep(3)
+    try:
+        already = client.is_logged_in
+    except Exception:
+        already = False
+
+    if not already:
+        print(f"📲 Solicitando código de pareamento para +{number}...")
+        for _ in range(40):
+            try:
+                code = client.PairPhone(number, True)
+                if code:
+                    _print_pair_code(code)
+                    break
+            except Exception:
+                time.sleep(1.5)
+        else:
+            print("❌ Não consegui solicitar o código. Verifique o número e a conexão.")
+    t.join()
+
+
 def main():
     db.init()
     if not config.OPENROUTER_API_KEY:
         print("⚠️  OPENROUTER_API_KEY não definida — o comando /IA ficará indisponível.")
     threading.Thread(target=reminder_loop, daemon=True).start()
-    print(f"🚀 Iniciando {config.BOT_NAME}... escaneie o QR code que vai aparecer.")
-    client.connect()
+
+    # método de login: código (padrão) ou QR
+    method = os.getenv("LOGIN_METHOD", "").strip().lower()
+    number = os.getenv("PHONE_NUMBER", "").strip()
+
+    if not method:
+        print(f"\n🚀 {config.BOT_NAME} — como deseja conectar?")
+        print("  [1] Código de pareamento (digitar o número)  ← recomendado")
+        print("  [2] QR Code")
+        try:
+            choice = input("Escolha [1/2]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            choice = "1"
+        method = "qr" if choice == "2" else "code"
+
+    if method.startswith("q"):
+        print("📷 Gerando QR Code... escaneie com o WhatsApp.")
+        client.connect()
+    else:
+        if not number:
+            try:
+                number = input("📱 Digite seu número com DDI e DDD (ex: 5511999999999): ").strip()
+            except (EOFError, KeyboardInterrupt):
+                number = ""
+        if not _normalize_number(number):
+            print("❌ Número inválido. Reinicie e informe o número com DDI+DDD.")
+            return
+        connect_with_paircode(number)
 
 
 if __name__ == "__main__":
