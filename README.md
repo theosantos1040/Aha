@@ -46,8 +46,29 @@ cp .env.example .env
 python run.py
 ```
 
-Abra o **WhatsApp > Aparelhos conectados > Conectar um aparelho** e escaneie o
-QR code que aparece no terminal. Pronto — o bot fica online.
+### 🔑 Login por código (recomendado) ou QR
+
+Ao rodar `python run.py`, o bot pergunta como conectar:
+
+```
+🚀 ThzyxBoTS — como deseja conectar?
+  [1] Código de pareamento (digitar o número)  ← recomendado
+  [2] QR Code
+```
+
+- **Opção 1 (código):** digite seu número com DDI+DDD (ex: `5511999999999`).
+  O bot mostra um código tipo `ABCD-1234`. No celular:
+  **WhatsApp > Aparelhos conectados > Conectar um aparelho >
+  Conectar com número de telefone** e digite o código.
+- **Opção 2 (QR):** escaneie o QR code que aparece no terminal.
+
+Para pular a pergunta, defina no `.env`:
+```
+LOGIN_METHOD=code
+PHONE_NUMBER=5511999999999
+```
+
+A sessão fica salva — nas próximas vezes ele conecta sozinho.
 
 ---
 
@@ -105,10 +126,25 @@ Três modelos gratuitos, **testados de verdade (HTTP 200)**:
 `/translate` · `/remind` · `/poll` · `/afk` · `/invite` · `/uptime` ·
 `/report` · `/suggest` · `/level` · `/leaderboard` · `/daily` · `/balance` · `/pay`
 
+### 🛡️ Segurança & Moderação
+`/antibot` · `/antilink` · `/antispam` · `/setlogs` · `/whitelist-add` ·
+`/whitelist-remove` · `/auditlog`
+
+### ⚙️ Configurações Globais
+`/setprefix` · `/maintenance` · `/backup-create` · `/backup-load`
+
 ### ✨ Recursos especiais
 - **`/fg`** — envie (ou responda) uma imagem/vídeo com `/fg` e o bot devolve uma **figurinha**.
 - **`/va`** — envie (ou responda) um vídeo com `/va` e o bot devolve o **áudio (mp3)**.
-- **`/welcome on`** — um admin ativa as **boas-vindas**: novos membros são recebidos com a **foto de perfil** e uma mensagem fofa decorada.
+- **`/welcome on`** — boas-vindas com **foto de perfil** do novo membro.
+- **`/clear N`** — apaga as últimas N mensagens (admins e usuários) via *revoke*.
+- **`/mute`** — silencia: apaga as mensagens do usuário e avisa *"Você foi silenciado ‼️⚠️"* (até 3x).
+- **`/antilink` / `/antispam` / `/antibot`** — moderação automática (apaga links, pune flood, bloqueia entradas não autorizadas).
+- **`/setlogs`** — canal de auditoria em tempo real; **`/auditlog`** lista as últimas ações.
+
+> ⚠️ **Para apagar mensagens de OUTROS** (`/clear`, `/mute`, `/antilink`) o bot
+> precisa ser **administrador** do grupo. **`/ttkvd`, `/fg` (vídeo) e `/va`**
+> exigem **ffmpeg** (`pkg install ffmpeg -y`).
 
 ### 🎮 Jogos & Brincadeiras (10)
 `/coinflip` · `/jokenpo` · `/8ball` · `/roll` · `/tictactoe` · `/trivia` ·

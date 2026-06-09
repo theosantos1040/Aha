@@ -60,6 +60,17 @@ def init(path: str = None):
             chat TEXT, key TEXT, value TEXT,
             PRIMARY KEY(chat, key)
         );
+        CREATE TABLE IF NOT EXISTS whitelist(
+            chat TEXT, jid TEXT, PRIMARY KEY(chat, jid)
+        );
+        CREATE TABLE IF NOT EXISTS auditlog(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat TEXT, actor TEXT, action TEXT, detail TEXT, ts INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS backups(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat TEXT, data TEXT, ts INTEGER
+        );
         """
     )
     _conn.commit()
@@ -212,7 +223,7 @@ def remove_ban(chat, jid):
     _exec("DELETE FROM banlist WHERE chat=? AND jid=?", (chat, jid))
 
 
-# ---------- configurações por grupo (ex.: bem-vindo) ----------
+# ---------- configurações por grupo (ex.: bem-vindo, anti-*, manutenção) ----------
 def set_setting(chat, key, value):
     _exec("INSERT OR REPLACE INTO settings(chat, key, value) VALUES(?,?,?)",
           (chat, key, str(value)))
@@ -221,6 +232,40 @@ def set_setting(chat, key, value):
 def get_setting(chat, key, default=None):
     row = _exec("SELECT value FROM settings WHERE chat=? AND key=?", (chat, key), "one")
     return row["value"] if row else default
+
+
+# ---------- whitelist (isenta da automoderação) ----------
+def whitelist_add(chat, jid):
+    _exec("INSERT OR IGNORE INTO whitelist(chat, jid) VALUES(?,?)", (chat, jid))
+
+
+def whitelist_remove(chat, jid):
+    _exec("DELETE FROM whitelist WHERE chat=? AND jid=?", (chat, jid))
+
+
+def is_whitelisted(chat, jid):
+    return bool(_exec("SELECT 1 FROM whitelist WHERE chat=? AND jid=?", (chat, jid), "one"))
+
+
+# ---------- audit log ----------
+def log_action(chat, actor, action, detail=""):
+    return _exec("INSERT INTO auditlog(chat, actor, action, detail, ts) VALUES(?,?,?,?,?)",
+                 (chat, actor, action, detail, int(time.time())))
+
+
+def get_auditlog(chat, limit=10):
+    return _exec("SELECT actor, action, detail, ts FROM auditlog WHERE chat=? "
+                 "ORDER BY id DESC LIMIT ?", (chat, limit), "all")
+
+
+# ---------- backups ----------
+def backup_save(chat, data):
+    return _exec("INSERT INTO backups(chat, data, ts) VALUES(?,?,?)",
+                 (chat, data, int(time.time())))
+
+
+def backup_get(chat, bid):
+    return _exec("SELECT data, ts FROM backups WHERE chat=? AND id=?", (chat, bid), "one")
 
 
 # ---------- lembretes ----------

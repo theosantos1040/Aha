@@ -1,30 +1,64 @@
 """Configuração central do ThzyxBoTS."""
 import os
 
+# guarda de onde a chave foi carregada (útil para diagnóstico)
+ENV_LOADED_FROM = None
+
+
+def _candidate_env_paths():
+    """Possíveis locais do .env: pasta do script, diretório atual e o pai."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    seen = []
+    for p in (
+        os.path.join(here, ".env"),
+        os.path.join(os.getcwd(), ".env"),
+        os.path.join(os.path.dirname(here), ".env"),
+    ):
+        if p not in seen:
+            seen.append(p)
+    return seen
+
+
+def _clean_value(value: str) -> str:
+    """Limpa o valor: aspas, espaços, comentário inline e caracteres invisíveis."""
+    value = value.strip()
+    # remove aspas envolventes
+    if len(value) >= 2 and value[0] in "\"'" and value[-1] == value[0]:
+        value = value[1:-1]
+    # remove BOM e zero-width que o nano/copiar-colar às vezes inserem
+    for junk in ("﻿", "​", "‎", "‏", "\xa0"):
+        value = value.replace(junk, "")
+    return value.strip()
+
 
 def _load_env_manual():
-    """Lê o arquivo .env sem depender do pacote python-dotenv.
+    """Lê o .env sem depender do python-dotenv (comum faltar no Termux).
 
-    No Termux é comum o python-dotenv não instalar; este fallback garante
-    que a chave da IA seja carregada mesmo assim.
+    Robusto a: BOM, CRLF, 'export KEY=', aspas, espaços e caminhos diferentes.
     """
-    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
-    if not os.path.exists(env_path):
-        return
-    try:
-        with open(env_path, "r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, _, value = line.partition("=")
-                key = key.strip()
-                value = value.strip().strip('"').strip("'")
-                # não sobrescreve variáveis já definidas no ambiente
-                if key and key not in os.environ:
-                    os.environ[key] = value
-    except Exception:
-        pass
+    global ENV_LOADED_FROM
+    for env_path in _candidate_env_paths():
+        if not os.path.exists(env_path):
+            continue
+        try:
+            # utf-8-sig remove BOM automaticamente
+            with open(env_path, "r", encoding="utf-8-sig") as fh:
+                for raw in fh:
+                    line = raw.strip().lstrip("﻿")
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    if line.lower().startswith("export "):
+                        line = line[7:]
+                    key, _, value = line.partition("=")
+                    key = key.strip().lstrip("﻿")
+                    value = _clean_value(value)
+                    if key:
+                        # sobrescreve para garantir o valor do .env
+                        os.environ[key] = value
+            ENV_LOADED_FROM = env_path
+            return
+        except Exception:
+            continue
 
 
 # 1) tenta o python-dotenv (se instalado); 2) fallback manual sempre roda
