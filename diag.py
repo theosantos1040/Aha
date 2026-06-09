@@ -122,6 +122,17 @@ def main():
         print("    ❌ Você ainda não trocou o valor de exemplo pela sua chave real!")
 
     test_api(config.OPENROUTER_API_KEY)
+
+    print("\n[5] Dependências de mídia (/ttkvd, /fg, /va):")
+    import shutil
+    for tool in ("ffmpeg", "ffprobe"):
+        ok = shutil.which(tool)
+        print(f"    {tool}: {'OK ✅' if ok else 'AUSENTE ❌ -> pkg install ffmpeg -y'}")
+    try:
+        import magic  # noqa
+        print("    libmagic (python-magic): OK ✅")
+    except Exception:
+        print("    libmagic: AUSENTE ❌ -> pkg install libmagic file -y")
     print("\n" + "=" * 55)
 
 

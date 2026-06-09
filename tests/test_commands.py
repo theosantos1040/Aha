@@ -83,11 +83,21 @@ class FakeClient:
     def download_any(self, message, path=None):
         return b"FAKE_MEDIA_BYTES" * 100
 
+    def download_media_with_path(self, direct_path, enc, fhash, mkey, flen, mtype, mms):
+        return b"FAKE_MEDIA_BYTES" * 100
+
     def send_sticker(self, to, file, **kw):
         self.actions.append(("sticker", len(file)))
 
     def send_audio(self, to, file, ptt=False, **kw):
         self.actions.append(("audio", len(file)))
+
+    def send_document(self, to, file, filename=None, mimetype=None, caption=None, **kw):
+        self.actions.append(("document", filename))
+
+    def revoke_message(self, chat, sender, message_id):
+        self.actions.append(("revoke", message_id))
+        return None
 
 
 def make_msg(text, sender=SENDER, mentions=None, is_group=True):
@@ -134,6 +144,21 @@ def run_media(text, media="video"):
     bot.client = fake
     msg = make_media_msg(text, media)
     bot.handle_command(msg, text)
+    return fake
+
+
+def run_event(text, sender=OTHER, msg_id="MID1"):
+    """Dispara on_message (para testar mute/antilink/antispam/manutenção)."""
+    fake = FakeClient(admin=True)  # SENDER é admin; OTHER não é
+    bot.client = fake
+    msg = N.Message()
+    msg.Info.MessageSource.Chat.CopyFrom(GROUP)
+    msg.Info.MessageSource.Sender.CopyFrom(sender)
+    msg.Info.MessageSource.IsGroup = True
+    msg.Info.MessageSource.IsFromMe = False
+    msg.Info.ID = msg_id
+    msg.Message.conversation = text
+    bot.handle_message(msg)
     return fake
 
 
@@ -229,6 +254,98 @@ def test_media_welcome():
     print("✓ figurinha/áudio/boas-vindas")
 
 
+def test_clear_and_mute():
+    gstr = bot.Jid2String(GROUP)
+    # popula histórico recente e testa /clear
+    bot._recent_msgs[gstr].clear()
+    for i in range(5):
+        bot._recent_msgs[gstr].append((bot.Jid2String(OTHER), f"M{i}"))
+    c = run("/clear 3")
+    revokes = [a for a in c.actions if a[0] == "revoke"]
+    assert len(revokes) == 3, revokes
+    assert "Apaguei" in c.sent[-1]
+    # MUTE: silencia OTHER, depois mensagem do OTHER deve ser revogada + aviso
+    run("/mute 5511888888888")
+    assert "muted" in bot.db.get_roles(gstr, "5511888888888")
+    ev = run_event("oi pessoal", sender=OTHER, msg_id="MUTE_MSG")
+    assert any(a[0] == "revoke" for a in ev.actions), ev.actions
+    assert any("silenciado" in s for s in ev.sent), ev.sent
+    # aviso limitado a 3x
+    for i in range(5):
+        run_event("spam", sender=OTHER, msg_id=f"M{i}")
+    total_avisos = bot._mute_warns[(gstr, "5511888888888")]
+    assert total_avisos == 3, total_avisos
+    run("/unmute 5511888888888")
+    assert "muted" not in bot.db.get_roles(gstr, "5511888888888")
+    print("✓ clear + mute (apaga msgs + aviso 3x)")
+
+
+def test_security():
+    gstr = bot.Jid2String(GROUP)
+    # ANTILINK
+    assert "ativado" in run("/antilink on").sent[0]
+    ev = run_event("entra nesse https://golpe.com/x", sender=OTHER, msg_id="L1")
+    assert any(a[0] == "revoke" for a in ev.actions), ev.actions
+    run("/antilink off")
+    # admin/whitelist não é punido
+    bot.db.whitelist_add(gstr, "5511888888888")
+    assert bot.db.is_whitelisted(gstr, "5511888888888")
+    run("/antilink on")
+    ev2 = run_event("olha http://site.com", sender=OTHER, msg_id="L2")
+    assert not any(a[0] == "revoke" for a in ev2.actions), "whitelist deveria isentar"
+    bot.db.whitelist_remove(gstr, "5511888888888")
+    run("/antilink off")
+    # ANTISPAM: 4 mensagens iguais -> mute
+    run("/antispam on")
+    bot._spam_track.clear()
+    last = None
+    for i in range(4):
+        last = run_event("mesma msg repetida", sender=OTHER, msg_id=f"S{i}")
+    assert "muted" in bot.db.get_roles(gstr, "5511888888888"), "antispam deveria silenciar"
+    run("/unmute 5511888888888")
+    run("/antispam off")
+    # toggles simples
+    assert "ativado" in run("/antibot on").sent[0]
+    run("/antibot off")
+    assert run("/setlogs").sent
+    assert bot.db.get_setting(gstr, "logchannel")
+    print("✓ segurança (antilink/antispam/antibot/whitelist/setlogs)")
+
+
+def test_global_tools():
+    gstr = bot.Jid2String(GROUP)
+    # maintenance bloqueia não-admin
+    run("/maintenance on")
+    blocked = run_event("/ping", sender=OTHER, msg_id="MNT1")
+    assert any("manutenção" in s for s in blocked.sent), blocked.sent
+    run("/maintenance off")
+    # backup create/load
+    bc = run("/backup-create")
+    assert any(a[0] == "document" for a in bc.actions) or bc.sent
+    bl = run("/backup-load 1")
+    assert any(("restaurado" in s or "não encontrado" in s) for s in bl.sent), bl.sent
+    # auditlog mostra ações
+    al = run("/auditlog 5")
+    assert any("auditoria" in s.lower() for s in al.sent), al.sent
+    print("✓ ferramentas globais (maintenance/backup/auditlog)")
+
+
+def test_antibot_event():
+    gstr = bot.Jid2String(GROUP)
+    run("/antibot on")
+    fake = FakeClient(admin=True)
+    bot.client = fake
+    ev = N.GroupInfoEvent()
+    ev.JID.CopyFrom(GROUP)
+    ev.Sender.CopyFrom(OTHER)          # quem adicionou NÃO é admin
+    newbie = ev.Join.add()
+    newbie.CopyFrom(build_jid("5511777777777"))
+    bot.handle_group_change(ev)
+    assert any(a[0] == "participants" for a in fake.actions), "antibot deveria remover"
+    run("/antibot off")
+    print("✓ antibot (remove entrada não autorizada)")
+
+
 def test_poll_afk():
     assert any(a[0] == "poll" for a in run("/poll Cor? | Azul | Verde").actions)
     assert "AFK" in run("/afk almoçando").sent[0]
@@ -244,5 +361,9 @@ if __name__ == "__main__":
     test_admin_commands()
     test_games()
     test_media_welcome()
+    test_clear_and_mute()
+    test_security()
+    test_global_tools()
+    test_antibot_event()
     test_poll_afk()
     print("\n✅ TODOS OS COMANDOS TESTADOS COM SUCESSO")

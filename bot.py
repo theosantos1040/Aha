@@ -3,14 +3,16 @@
 Transporte: neonize (binding do whatsmeow, WhatsApp multidevice).
 Execute com:  python run.py   (escaneie o QR com o WhatsApp)
 """
+import json
 import random
+import re
 import threading
 import time
 
 import neonize.proto.Neonize_pb2 as N
 from neonize.client import NewClient
 from neonize.events import ConnectedEv, GroupInfoEv, MessageEv, PairStatusEv
-from neonize.utils.enum import ParticipantChange, VoteType
+from neonize.utils.enum import MediaType, MediaTypeToMMS, ParticipantChange, VoteType
 from neonize.utils.jid import build_jid, Jid2String
 
 import config
@@ -27,6 +29,19 @@ client = NewClient(config.SESSION_DB)
 
 # estado em memória para jogos interativos por chat
 _active_games = {}  # chat_str -> dict
+# histórico recente de mensagens p/ /clear (chat_str -> deque[(sender_str, msg_id)])
+from collections import deque, defaultdict
+
+_recent_msgs = defaultdict(lambda: deque(maxlen=300))
+# contador de avisos de mute p/ evitar spam (chave (chat,sender) -> int)
+_mute_warns = defaultdict(int)
+# antispam: últimas mensagens por usuário (chave (chat,sender) -> (texto, repeticoes))
+_spam_track = {}
+
+
+LINK_RE = re.compile(
+    r"(https?://|www\.|chat\.whatsapp\.com/|t\.me/|wa\.me/|discord\.gg/)", re.IGNORECASE
+)
 
 
 # ===================== helpers =====================
@@ -55,39 +70,87 @@ def parse_jid(jid_str: str):
     return build_jid(user, server or "s.whatsapp.net")
 
 
+_MEDIA_MAP = {
+    "image": ("imageMessage", MediaType.MediaImage, MediaTypeToMMS.MediaImage),
+    "video": ("videoMessage", MediaType.MediaVideo, MediaTypeToMMS.MediaVideo),
+    "audio": ("audioMessage", MediaType.MediaAudio, MediaTypeToMMS.MediaAudio),
+}
+
+
 def _media_kind(inner) -> str:
     """Descobre o tipo de mídia presente numa Message interna (waE2E)."""
-    if inner.videoMessage.URL or inner.videoMessage.mediaKey:
+    if inner.videoMessage.mediaKey:
         return "video"
-    if inner.imageMessage.URL or inner.imageMessage.mediaKey:
+    if inner.imageMessage.mediaKey:
         return "image"
-    if inner.audioMessage.URL or inner.audioMessage.mediaKey:
+    if inner.audioMessage.mediaKey:
         return "audio"
     return ""
+
+
+def _download_sub(inner, kind: str) -> bytes:
+    """Baixa a mídia extraindo os campos do sub-objeto (robusto p/ citadas)."""
+    field, mtype, mms = _MEDIA_MAP[kind]
+    sub = getattr(inner, field)
+    return client.download_media_with_path(
+        sub.directPath,
+        sub.fileEncSHA256,
+        sub.fileSHA256,
+        sub.mediaKey,
+        sub.fileLength,
+        mtype,
+        mms,
+    )
 
 
 def get_media(message):
     """Retorna (bytes, tipo) da mídia da própria mensagem ou da mensagem citada.
 
-    Permite usar /fg e /va tanto enviando a mídia com o comando na legenda
-    quanto respondendo a uma mídia.
+    Usa download_media_with_path em vez de download_any para evitar erros de
+    wire-format ao baixar mídia de mensagens citadas. Funciona tanto enviando
+    a mídia com /fg|/va na legenda quanto respondendo a uma mídia.
     """
     inner = message.Message
     kind = _media_kind(inner)
     if kind:
-        return client.download_any(message), kind
+        return _download_sub(inner, kind), kind
     # tenta a mensagem citada (respondida)
     quoted = inner.extendedTextMessage.contextInfo.quotedMessage
     qkind = _media_kind(quoted)
     if qkind:
-        wrapper = N.Message()
-        wrapper.Message.CopyFrom(quoted)
-        return client.download_any(wrapper), qkind
+        return _download_sub(quoted, qkind), qkind
     return None, ""
 
 
 def short_jid(jid_str: str) -> str:
     return jid_str.split("@")[0].split(":")[0]
+
+
+def revoke(chat, sender_str: str, msg_id: str) -> bool:
+    """Apaga (revoga) uma mensagem. Exige que o bot seja admin do grupo."""
+    try:
+        client.revoke_message(chat, parse_jid(sender_str), msg_id)
+        return True
+    except Exception:
+        return False
+
+
+def audit(chat, chat_str: str, actor: str, action: str, detail: str = ""):
+    """Registra ação no log de auditoria e envia ao canal de logs (se houver)."""
+    try:
+        db.log_action(chat_str, actor, action, detail)
+    except Exception:
+        pass
+    log_ch = db.get_setting(chat_str, "logchannel")
+    if log_ch:
+        try:
+            when = time.strftime("%d/%m %H:%M")
+            client.send_message(
+                parse_jid(log_ch),
+                f"📋 *LOG* [{when}]\n👤 {short_jid(actor)}\n⚙️ {action}\n{detail}".strip(),
+            )
+        except Exception:
+            pass
 
 
 def is_group_admin(chat, sender_str: str) -> bool:
@@ -157,7 +220,19 @@ def cmd_ttkvd(ctx):
     try:
         client.send_video(ctx.chat, video, caption=f"🎬 {title}")
     except Exception as exc:
-        ctx.reply(f"❌ Erro ao enviar o vídeo: {exc}")
+        # neonize usa ffprobe (pacote ffmpeg) para enviar vídeo; se faltar,
+        # envia como documento para o usuário ainda receber o arquivo.
+        msg = str(exc)
+        if "ffprobe" in msg or "ffmpeg" in msg or "No such file" in msg:
+            try:
+                client.send_document(
+                    ctx.chat, video, filename="tiktok.mp4",
+                    mimetype="video/mp4", caption=f"🎬 {title}\n_(instale ffmpeg p/ enviar como vídeo: pkg install ffmpeg -y)_",
+                )
+                return
+            except Exception as exc2:
+                msg = str(exc2)
+        ctx.reply(f"❌ Erro ao enviar o vídeo: {msg}")
 
 
 def cmd_ban(ctx):
@@ -203,12 +278,14 @@ def cmd_mute(ctx):
         return
     target = ctx.target_jid_str()
     if not target:
-        return ctx.reply("Uso: /mute @usuario [tempo]")
-    db.add_role(ctx.chat_str, short_jid(target), "muted")
+        return ctx.reply("Uso: /mute @usuario")
+    phone = short_jid(target)
+    db.add_role(ctx.chat_str, phone, "muted")
+    _mute_warns[(ctx.chat_str, phone)] = 0  # reseta avisos
+    audit(ctx.chat, ctx.chat_str, ctx.sender_str, "MUTE", f"alvo: {phone}")
     ctx.reply(
-        f"🔇 @{short_jid(target)} foi silenciado pelo bot.\n"
-        "_Obs.: o WhatsApp não permite impedir o envio por terceiros; o bot registra "
-        "o silenciamento. Use /lock para travar o grupo só para admins._"
+        f"🔇 @{phone} foi *silenciado*. As mensagens dele serão apagadas "
+        "automaticamente.\n_(o bot precisa ser admin para apagar)_"
     )
 
 
@@ -218,17 +295,33 @@ def cmd_unmute(ctx):
     target = ctx.target_jid_str()
     if not target:
         return ctx.reply("Uso: /unmute @usuario")
-    db.remove_role(ctx.chat_str, short_jid(target), "muted")
-    ctx.reply(f"🔊 @{short_jid(target)} foi dessilenciado.")
+    phone = short_jid(target)
+    db.remove_role(ctx.chat_str, phone, "muted")
+    _mute_warns.pop((ctx.chat_str, phone), None)
+    _spam_track.pop((ctx.chat_str, phone), None)
+    audit(ctx.chat, ctx.chat_str, ctx.sender_str, "UNMUTE", f"alvo: {phone}")
+    ctx.reply(f"🔊 @{phone} foi dessilenciado.")
 
 
 def cmd_clear(ctx):
     if not ctx.require_admin():
         return
+    qty = 50
+    if ctx.parts and ctx.parts[0].isdigit():
+        qty = max(1, min(int(ctx.parts[0]), 300))
+    recent = _recent_msgs.get(ctx.chat_str)
+    if not recent:
+        return ctx.reply("🧹 Não há mensagens recentes registradas para apagar.")
+    apagadas = 0
+    # apaga das mais recentes para as mais antigas
+    for sender_str, msg_id in list(recent)[-qty:][::-1]:
+        if revoke(ctx.chat, sender_str, msg_id):
+            apagadas += 1
+        recent.remove((sender_str, msg_id)) if (sender_str, msg_id) in recent else None
+    audit(ctx.chat, ctx.chat_str, ctx.sender_str, "CLEAR", f"{apagadas} mensagens")
     ctx.reply(
-        "🧹 O WhatsApp só permite apagar mensagens *do próprio bot*. "
-        "Mensagens de outros membros não podem ser apagadas via API. "
-        "Para limpar o histórico, use a função nativa do app."
+        f"🧹 Apaguei *{apagadas}* mensagem(ns) (admins e usuários).\n"
+        "_Se nada sumiu, confirme que o bot é admin do grupo._"
     )
 
 
@@ -361,6 +454,154 @@ def cmd_welcome(ctx):
         ctx.reply(f"Uso: /welcome on  |  /welcome off\nStatus atual: {status}")
 
 
+def _toggle(ctx, key: str, nome: str, emoji: str):
+    """Helper genérico para comandos liga/desliga (anti*, maintenance)."""
+    if not ctx.require_admin():
+        return
+    arg = (ctx.parts[0].lower() if ctx.parts else "")
+    if arg in ("on", "ativar", "ligar", "sim"):
+        db.set_setting(ctx.chat_str, key, "1")
+        audit(ctx.chat, ctx.chat_str, ctx.sender_str, key.upper(), "ativado")
+        ctx.reply(f"{emoji} *{nome}* ativado ✅")
+    elif arg in ("off", "desativar", "desligar", "nao", "não"):
+        db.set_setting(ctx.chat_str, key, "0")
+        audit(ctx.chat, ctx.chat_str, ctx.sender_str, key.upper(), "desativado")
+        ctx.reply(f"{emoji} *{nome}* desativado ❌")
+    else:
+        st = "ativado ✅" if db.get_setting(ctx.chat_str, key) == "1" else "desativado ❌"
+        ctx.reply(f"Uso: /{key} on | off\n{nome}: {st}")
+
+
+def cmd_antibot(ctx):
+    _toggle(ctx, "antibot", "Antibot (bloqueia bots não autorizados)", "🛡️")
+
+
+def cmd_antilink(ctx):
+    _toggle(ctx, "antilink", "Antilink (apaga links/convites)", "🔗")
+
+
+def cmd_antispam(ctx):
+    _toggle(ctx, "antispam", "Antispam (pune mensagens repetidas)", "🚯")
+
+
+def cmd_maintenance(ctx):
+    _toggle(ctx, "maintenance", "Modo manutenção (só admins usam o bot)", "🛠️")
+
+
+def cmd_setlogs(ctx):
+    if not ctx.require_admin():
+        return
+    # define o canal de logs: se mencionou/citou um grupo use; senão o próprio chat
+    target = None
+    if ctx.parts:
+        digits = "".join(c for c in ctx.args if c.isdigit() or c == "-")
+        if digits:
+            target = ctx.args.strip()
+    if not target:
+        target = ctx.chat_str  # usa o chat atual como canal de logs
+    db.set_setting(ctx.chat_str, "logchannel", target)
+    audit(ctx.chat, ctx.chat_str, ctx.sender_str, "SETLOGS", target)
+    ctx.reply(f"📋 Canal de logs definido: `{short_jid(target)}`\nReceberá ações de auditoria em tempo real.")
+
+
+def cmd_whitelist_add(ctx):
+    if not ctx.require_admin():
+        return
+    target = ctx.target_jid_str()
+    if not target:
+        return ctx.reply("Uso: /whitelist-add @usuario (ou número/id)")
+    db.whitelist_add(ctx.chat_str, short_jid(target))
+    audit(ctx.chat, ctx.chat_str, ctx.sender_str, "WHITELIST_ADD", short_jid(target))
+    ctx.reply(f"⭐ @{short_jid(target)} adicionado à *whitelist* (isento da automoderação).")
+
+
+def cmd_whitelist_remove(ctx):
+    if not ctx.require_admin():
+        return
+    target = ctx.target_jid_str()
+    if not target:
+        return ctx.reply("Uso: /whitelist-remove @usuario (ou número/id)")
+    db.whitelist_remove(ctx.chat_str, short_jid(target))
+    audit(ctx.chat, ctx.chat_str, ctx.sender_str, "WHITELIST_REMOVE", short_jid(target))
+    ctx.reply(f"➖ @{short_jid(target)} removido da whitelist.")
+
+
+def cmd_backup_create(ctx):
+    if not ctx.require_admin():
+        return
+    chat_str = ctx.chat_str
+    snapshot = {
+        "chat": chat_str,
+        "ts": int(time.time()),
+        "settings": {k: db.get_setting(chat_str, k) for k in
+                     ["welcome", "antibot", "antilink", "antispam", "maintenance",
+                      "logchannel", ]},
+        "prefix": db.get_prefix(chat_str),
+    }
+    # estrutura do grupo (participantes/admins), se possível
+    try:
+        info = client.get_group_info(ctx.chat)
+        snapshot["group_name"] = info.GroupName.Name
+        snapshot["participants"] = [
+            {"jid": short_jid(Jid2String(p.JID)), "admin": bool(p.IsAdmin or p.IsSuperAdmin)}
+            for p in info.Participants
+        ]
+    except Exception:
+        pass
+    data = json.dumps(snapshot, ensure_ascii=False, indent=2)
+    bid = db.backup_save(chat_str, data)
+    audit(ctx.chat, ctx.chat_str, ctx.sender_str, "BACKUP_CREATE", f"#{bid}")
+    # envia o arquivo de backup
+    try:
+        client.send_document(ctx.chat, data.encode("utf-8"),
+                             filename=f"backup_{bid}.json", mimetype="application/json",
+                             caption=f"💾 Backup #{bid} criado. Restaure com /backup-load {bid}")
+    except Exception:
+        ctx.reply(f"💾 Backup *#{bid}* criado e salvo. Use /backup-load {bid} para restaurar.")
+
+
+def cmd_backup_load(ctx):
+    if not ctx.require_admin():
+        return
+    if not ctx.parts or not ctx.parts[0].isdigit():
+        return ctx.reply("Uso: /backup-load <id_backup>")
+    bid = int(ctx.parts[0])
+    row = db.backup_get(ctx.chat_str, bid)
+    if not row:
+        return ctx.reply(f"❌ Backup #{bid} não encontrado neste grupo.")
+    try:
+        snap = json.loads(row["data"])
+    except Exception:
+        return ctx.reply("❌ Backup corrompido.")
+    # restaura configurações (bot-level)
+    for k, v in (snap.get("settings") or {}).items():
+        if v is not None:
+            db.set_setting(ctx.chat_str, k, v)
+    if snap.get("prefix"):
+        db.set_prefix(ctx.chat_str, snap["prefix"])
+    audit(ctx.chat, ctx.chat_str, ctx.sender_str, "BACKUP_LOAD", f"#{bid}")
+    ctx.reply(
+        f"♻️ Backup *#{bid}* restaurado (configurações e prefixo).\n"
+        "_Cargos nativos do WhatsApp precisam ser reaplicados manualmente pela API._"
+    )
+
+
+def cmd_auditlog(ctx):
+    if not ctx.require_admin():
+        return
+    qty = 10
+    if ctx.parts and ctx.parts[0].isdigit():
+        qty = max(1, min(int(ctx.parts[0]), 30))
+    logs = db.get_auditlog(ctx.chat_str, qty)
+    if not logs:
+        return ctx.reply("📋 Nenhuma ação registrada ainda.")
+    lines = [f"📋 *Últimas {len(logs)} ações de auditoria:*"]
+    for lg in logs:
+        when = time.strftime("%d/%m %H:%M", time.localtime(lg["ts"]))
+        lines.append(f"• [{when}] {short_jid(lg['actor'])} → *{lg['action']}* {lg['detail']}")
+    ctx.reply("\n".join(lines))
+
+
 # ===================== GERAIS / UTILITÁRIOS =====================
 def cmd_ia(ctx):
     if not ctx.args:
@@ -407,11 +648,16 @@ def cmd_help(ctx):
         f"{config.DECO_TOP}\n"
         f"📜 *{config.BOT_NAME} — Menu Completo*\n"
         f"{config.DECO_LINE}\n\n"
-        f"👮 *Administração (19)*\n"
+        f"👮 *Administração*\n"
         f"└─ {p}ban {p}unban {p}kick {p}mute {p}unmute {p}warn {p}checkwarns\n"
         f"   {p}lock {p}unlock {p}announce {p}clear {p}nuke {p}ttkvd\n"
-        f"   {p}welcome {p}setprefix {p}addrole {p}removerole {p}slowmode\n\n"
-        f"🛠️ *Gerais & Utilitários (23)*\n"
+        f"   {p}welcome {p}addrole {p}removerole {p}slowmode\n\n"
+        f"🛡️ *Segurança & Moderação*\n"
+        f"└─ {p}antibot {p}antilink {p}antispam {p}setlogs\n"
+        f"   {p}whitelist-add {p}whitelist-remove {p}auditlog\n\n"
+        f"⚙️ *Configurações Globais*\n"
+        f"└─ {p}setprefix {p}maintenance {p}backup-create {p}backup-load\n\n"
+        f"🛠️ *Gerais & Utilitários*\n"
         f"└─ {p}IA {p}ping {p}help {p}userinfo {p}serverinfo {p}avatar\n"
         f"   {p}fg {p}va {p}calc {p}weather {p}translate {p}remind {p}poll\n"
         f"   {p}afk {p}invite {p}uptime {p}report {p}suggest {p}level\n"
@@ -792,6 +1038,11 @@ COMMANDS = {
     "warn": cmd_warn, "checkwarns": cmd_checkwarns, "setprefix": cmd_setprefix,
     "addrole": cmd_addrole, "removerole": cmd_removerole, "slowmode": cmd_slowmode,
     "announce": cmd_announce, "nuke": cmd_nuke, "welcome": cmd_welcome,
+    "antibot": cmd_antibot, "antilink": cmd_antilink, "antispam": cmd_antispam,
+    "setlogs": cmd_setlogs, "whitelist-add": cmd_whitelist_add,
+    "whitelist-remove": cmd_whitelist_remove, "maintenance": cmd_maintenance,
+    "backup-create": cmd_backup_create, "backup-load": cmd_backup_load,
+    "auditlog": cmd_auditlog,
     "ia": cmd_ia, "ping": cmd_ping, "help": cmd_help, "userinfo": cmd_userinfo,
     "serverinfo": cmd_serverinfo, "avatar": cmd_avatar, "fg": cmd_fg, "va": cmd_va,
     "calc": cmd_calc,
@@ -838,7 +1089,11 @@ def on_pair(_, message):
 
 @client.event(GroupInfoEv)
 def on_group_change(_, event):
-    """Dá boas-vindas a novos membros (se /welcome estiver ativado)."""
+    handle_group_change(event)
+
+
+def handle_group_change(event):
+    """Boas-vindas a novos membros (/welcome) e barreira antibot."""
     try:
         joined = list(event.Join)
     except Exception:
@@ -847,6 +1102,33 @@ def on_group_change(_, event):
         return
     chat = event.JID
     chat_str = Jid2String(chat)
+
+    # ----- ANTIBOT: bloqueia entradas feitas por quem não é admin -----
+    if db.get_setting(chat_str, "antibot") == "1":
+        try:
+            adder = Jid2String(event.Sender) if event.Sender.User else ""
+        except Exception:
+            adder = ""
+        adder_is_admin = bool(adder) and is_group_admin(chat, adder)
+        if not adder_is_admin:
+            removed = []
+            for member in joined:
+                m_str = Jid2String(member)
+                if db.is_whitelisted(chat_str, short_jid(m_str)):
+                    continue
+                try:
+                    client.update_group_participants(chat, [member], ParticipantChange.REMOVE)
+                    removed.append(short_jid(m_str))
+                except Exception:
+                    pass
+            if removed:
+                audit(chat, chat_str, adder or "?", "ANTIBOT", f"removidos: {', '.join(removed)}")
+                try:
+                    client.send_message(chat, f"🛡️ Antibot: entrada não autorizada bloqueada ({', '.join('@'+r for r in removed)}).")
+                except Exception:
+                    pass
+            return  # não dá boas-vindas a quem foi removido
+
     if db.get_setting(chat_str, "welcome") != "1":
         return
     for member in joined:
@@ -875,17 +1157,75 @@ def on_group_change(_, event):
                 pass
 
 
+def _is_exempt(chat, chat_str, sender_str):
+    """Admin ou whitelist => isento da automoderação."""
+    if db.is_whitelisted(chat_str, short_jid(sender_str)):
+        return True
+    return is_group_admin(chat, sender_str)
+
+
 @client.event(MessageEv)
 def on_message(_, message):
+    handle_message(message)
+
+
+def handle_message(message):
     src = message.Info.MessageSource
     if src.IsFromMe:
         return
-    text = get_text(message)
-    if not text:
-        return
 
-    chat_str = Jid2String(src.Chat)
+    chat = src.Chat
+    chat_str = Jid2String(chat)
     sender_str = Jid2String(src.Sender)
+    phone = short_jid(sender_str)
+    msg_id = message.Info.ID
+    text = get_text(message)
+
+    # registra a mensagem recente (para /clear) — inclui mídia
+    if src.IsGroup and msg_id:
+        _recent_msgs[chat_str].append((sender_str, msg_id))
+
+    # ----- MUTE: apaga msgs do silenciado + avisa (máx. 3x) -----
+    try:
+        if src.IsGroup and "muted" in db.get_roles(chat_str, phone):
+            revoke(chat, sender_str, msg_id)
+            kc = (chat_str, phone)
+            if _mute_warns[kc] < 3:
+                _mute_warns[kc] += 1
+                client.send_message(chat, f"@{phone} Você foi silenciado ‼️⚠️")
+            return
+    except Exception:
+        pass
+
+    # ----- automoderação (antilink / antispam) -----
+    if src.IsGroup and text and not _is_exempt(chat, chat_str, sender_str):
+        # ANTILINK
+        try:
+            if db.get_setting(chat_str, "antilink") == "1" and LINK_RE.search(text):
+                revoke(chat, sender_str, msg_id)
+                audit(chat, chat_str, sender_str, "ANTILINK", "link removido")
+                client.send_message(chat, f"🔗 @{phone}, links não são permitidos aqui! Mensagem removida.")
+                return
+        except Exception:
+            pass
+        # ANTISPAM (mesma mensagem repetida)
+        try:
+            if db.get_setting(chat_str, "antispam") == "1":
+                last_text, count = _spam_track.get((chat_str, phone), ("", 0))
+                if text == last_text:
+                    count += 1
+                else:
+                    count = 1
+                _spam_track[(chat_str, phone)] = (text, count)
+                if count >= 4:
+                    revoke(chat, sender_str, msg_id)
+                    db.add_role(chat_str, phone, "muted")
+                    _mute_warns[(chat_str, phone)] = 0
+                    audit(chat, chat_str, sender_str, "ANTISPAM", "silenciado por flood")
+                    client.send_message(chat, f"🚯 @{phone} foi silenciado por *spam* (mensagens repetidas)!")
+                    return
+        except Exception:
+            pass
 
     # XP por mensagem
     try:
@@ -895,17 +1235,20 @@ def on_message(_, message):
 
     # auto-remover banidos
     try:
-        if src.IsGroup and db.is_banned(chat_str, short_jid(sender_str)):
-            client.update_group_participants(src.Chat, [src.Sender], ParticipantChange.REMOVE)
+        if src.IsGroup and db.is_banned(chat_str, phone):
+            client.update_group_participants(chat, [src.Sender], ParticipantChange.REMOVE)
             return
     except Exception:
         pass
+
+    if not text:
+        return
 
     # voltar de AFK
     try:
         if db.get_afk(sender_str):
             db.clear_afk(sender_str)
-            client.send_message(src.Chat, f"👋 Bem-vindo de volta, @{short_jid(sender_str)}! AFK removido.")
+            client.send_message(chat, f"👋 Bem-vindo de volta, @{phone}! AFK removido.")
     except Exception:
         pass
 
@@ -914,12 +1257,17 @@ def on_message(_, message):
         for m in get_mentions(message):
             af = db.get_afk(m)
             if af:
-                client.send_message(src.Chat, f"💤 @{short_jid(m)} está AFK: {af['reason']}")
+                client.send_message(chat, f"💤 @{short_jid(m)} está AFK: {af['reason']}")
     except Exception:
         pass
 
     prefix = db.get_prefix(chat_str)
     if text.startswith(prefix):
+        # ----- MODO MANUTENÇÃO: só admins -----
+        if db.get_setting(chat_str, "maintenance") == "1" and src.IsGroup:
+            if not _is_exempt(chat, chat_str, sender_str):
+                client.send_message(chat, "🛠️ Bot em *modo manutenção*. Apenas administradores podem usá-lo agora.")
+                return
         handle_command(message, text)
 
 
