@@ -23,8 +23,8 @@ git checkout claude/whatsapp-ai-bot-python-hk270m
 pip install -r requirements.txt
 
 cp .env.example .env
-nano .env          # cole sua OPENROUTER_API_KEY
-python run.py      # escaneie o QR code
+nano .env          # cole sua OPENROUTER_API_KEY (e PHONE_NUMBER, opcional)
+python run.py      # login por CÓDIGO (recomendado) ou QR — ele pergunta
 ```
 
 > **`ffmpeg`** é necessário para `/va` (vídeo→áudio) e figurinhas de vídeo.
