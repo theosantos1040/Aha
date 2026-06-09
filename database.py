@@ -56,6 +56,10 @@ def init(path: str = None):
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             chat TEXT, by TEXT, target TEXT, reason TEXT, ts INTEGER
         );
+        CREATE TABLE IF NOT EXISTS settings(
+            chat TEXT, key TEXT, value TEXT,
+            PRIMARY KEY(chat, key)
+        );
         """
     )
     _conn.commit()
@@ -206,6 +210,17 @@ def is_banned(chat, jid):
 
 def remove_ban(chat, jid):
     _exec("DELETE FROM banlist WHERE chat=? AND jid=?", (chat, jid))
+
+
+# ---------- configurações por grupo (ex.: bem-vindo) ----------
+def set_setting(chat, key, value):
+    _exec("INSERT OR REPLACE INTO settings(chat, key, value) VALUES(?,?,?)",
+          (chat, key, str(value)))
+
+
+def get_setting(chat, key, default=None):
+    row = _exec("SELECT value FROM settings WHERE chat=? AND key=?", (chat, key), "one")
+    return row["value"] if row else default
 
 
 # ---------- lembretes ----------

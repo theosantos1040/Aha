@@ -8,7 +8,31 @@ Bot de WhatsApp em **Python** com inteligência artificial (via **OpenRouter**) 
 
 ---
 
-## ⚡ Instalação rápida
+## 📱 Instalação no Termux (Android)
+
+```bash
+# dependências do sistema (IMPORTANTE no Termux)
+pkg update && pkg upgrade -y
+pkg install python git ffmpeg -y
+# o neonize precisa do libmagic/file:
+pkg install file -y
+
+git clone https://github.com/theosantos1040/Aha.git
+cd Aha
+git checkout claude/whatsapp-ai-bot-python-hk270m
+pip install -r requirements.txt
+
+cp .env.example .env
+nano .env          # cole sua OPENROUTER_API_KEY
+python run.py      # escaneie o QR code
+```
+
+> **`ffmpeg`** é necessário para `/va` (vídeo→áudio) e figurinhas de vídeo.
+> **`file`/`libmagic`** é necessário para o neonize iniciar.
+
+---
+
+## ⚡ Instalação rápida (PC/Linux)
 
 ```bash
 # 1. Instalar dependências
@@ -69,16 +93,22 @@ Três modelos gratuitos, **testados de verdade (HTTP 200)**:
 
 ## 📜 Comandos
 
-### 👮 Administração (16)
-`/ttkvd` (baixa vídeo do TikTok) · `/ban` · `/kick` · `/mute` · `/unmute` ·
-`/clear` · `/lock` · `/unlock` · `/warn` · `/checkwarns` · `/setprefix` ·
-`/addrole` · `/removerole` · `/slowmode` · `/announce` · `/nuke`
+### 👮 Administração (19)
+`/ttkvd` (baixa vídeo do TikTok) · `/ban` · `/unban` · `/kick` · `/mute` ·
+`/unmute` · `/clear` · `/lock` · `/unlock` · `/warn` · `/checkwarns` ·
+`/welcome` (boas-vindas com foto) · `/setprefix` · `/addrole` · `/removerole` ·
+`/slowmode` · `/announce` · `/nuke`
 
-### 🛠️ Gerais & Utilitários (21)
-`/IA` · `/ping` · `/help` · `/userinfo` · `/serverinfo` · `/avatar` · `/calc` ·
-`/weather` · `/translate` · `/remind` · `/poll` · `/afk` · `/invite` ·
-`/uptime` · `/report` · `/suggest` · `/level` · `/leaderboard` · `/daily` ·
-`/balance` · `/pay`
+### 🛠️ Gerais & Utilitários (23)
+`/IA` · `/ping` · `/help` · `/userinfo` · `/serverinfo` · `/avatar` ·
+`/fg` (vira figurinha) · `/va` (vídeo→áudio) · `/calc` · `/weather` ·
+`/translate` · `/remind` · `/poll` · `/afk` · `/invite` · `/uptime` ·
+`/report` · `/suggest` · `/level` · `/leaderboard` · `/daily` · `/balance` · `/pay`
+
+### ✨ Recursos especiais
+- **`/fg`** — envie (ou responda) uma imagem/vídeo com `/fg` e o bot devolve uma **figurinha**.
+- **`/va`** — envie (ou responda) um vídeo com `/va` e o bot devolve o **áudio (mp3)**.
+- **`/welcome on`** — um admin ativa as **boas-vindas**: novos membros são recebidos com a **foto de perfil** e uma mensagem fofa decorada.
 
 ### 🎮 Jogos & Brincadeiras (10)
 `/coinflip` · `/jokenpo` · `/8ball` · `/roll` · `/tictactoe` · `/trivia` ·
