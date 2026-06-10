@@ -1,5 +1,60 @@
-"""Serviços externos simples: clima e tradução (sem chave de API)."""
+"""Serviços externos simples: clima, tradução, QR, links, cripto, memes."""
 import requests
+
+
+def qr_png(text: str) -> bytes:
+    """Gera um QR Code (PNG) via api.qrserver.com — sem chave."""
+    r = requests.get(
+        "https://api.qrserver.com/v1/create-qr-code/",
+        params={"size": "400x400", "data": text}, timeout=30,
+    )
+    r.raise_for_status()
+    return r.content
+
+
+def shorten_url(url: str) -> str:
+    """Encurta um link usando is.gd (sem chave)."""
+    try:
+        r = requests.get("https://is.gd/create.php",
+                         params={"format": "simple", "url": url}, timeout=20)
+        if r.status_code == 200 and r.text.startswith("http"):
+            return r.text.strip()
+        return f"❌ Não consegui encurtar: {r.text[:80]}"
+    except Exception as exc:
+        return f"❌ Erro ao encurtar: {exc}"
+
+
+def crypto_price(coin: str) -> str:
+    """Preço de uma criptomoeda via CoinGecko (sem chave)."""
+    ids = {"btc": "bitcoin", "eth": "ethereum", "bnb": "binancecoin",
+           "sol": "solana", "doge": "dogecoin", "ada": "cardano",
+           "xrp": "ripple", "ltc": "litecoin"}
+    cid = ids.get(coin.lower(), coin.lower())
+    try:
+        r = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": cid, "vs_currencies": "usd,brl",
+                    "include_24hr_change": "true"}, timeout=25)
+        r.raise_for_status()
+        d = r.json().get(cid)
+        if not d:
+            return f"❌ Cripto '{coin}' não encontrada."
+        chg = d.get("usd_24h_change", 0)
+        emoji = "📈" if chg >= 0 else "📉"
+        return (f"💰 *{cid.title()}*\n"
+                f"💵 US$ {d['usd']:,.2f}\n"
+                f"🇧🇷 R$ {d.get('brl', 0):,.2f}\n"
+                f"{emoji} 24h: {chg:+.2f}%")
+    except Exception as exc:
+        return f"❌ Erro ao buscar cripto: {exc}"
+
+
+def random_meme() -> tuple:
+    """Retorna (url_imagem, titulo) de um meme via meme-api (sem chave)."""
+    r = requests.get("https://meme-api.com/gimme", timeout=25)
+    r.raise_for_status()
+    d = r.json()
+    return d.get("url"), d.get("title", "meme")
 
 
 def weather(city: str) -> str:

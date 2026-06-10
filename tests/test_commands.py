@@ -28,6 +28,15 @@ SENDER = build_jid("5511999999999")
 OTHER = build_jid("5511888888888")
 
 
+def _real_png():
+    """PNG real pequeno para os testes de figurinha (image_to_sticker)."""
+    import io
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (64, 48), (10, 150, 240)).save(buf, "PNG")
+    return buf.getvalue()
+
+
 class FakeClient:
     def __init__(self, admin=True):
         self.sent = []
@@ -81,10 +90,10 @@ class FakeClient:
         return N.Message()
 
     def download_any(self, message, path=None):
-        return b"FAKE_MEDIA_BYTES" * 100
+        return _real_png()
 
     def download_media_with_path(self, direct_path, enc, fhash, mkey, flen, mtype, mms):
-        return b"FAKE_MEDIA_BYTES" * 100
+        return _real_png()
 
     def send_sticker(self, to, file, **kw):
         self.actions.append(("sticker", len(file)))
@@ -233,12 +242,13 @@ def test_games():
 
 
 def test_media_welcome():
-    # /fg com imagem -> deve criar sticker
+    # /fg com imagem -> deve criar sticker (PIL, sem ffmpeg)
     fg_img = run_media("/fg", "image")
     assert any(a[0] == "sticker" for a in fg_img.actions), fg_img.sent
-    # /fg com vídeo -> sticker animado
+    # /fg com vídeo -> sticker animado se houver ffmpeg+libwebp; senão msg clara
     fg_vid = run_media("/fg", "video")
-    assert any(a[0] == "sticker" for a in fg_vid.actions)
+    out_vid = " ".join(fg_vid.sent).lower()
+    assert any(a[0] == "sticker" for a in fg_vid.actions) or "ffmpeg" in out_vid or "libwebp" in out_vid
     # /fg sem mídia -> instruções
     assert "imagem" in run("/fg").sent[0].lower()
     # /va com vídeo -> tenta converter (sem ffmpeg dá msg de ffmpeg)
@@ -355,6 +365,112 @@ def test_poll_afk():
     print("✓ poll/afk/suggest/report/remind")
 
 
+def test_ia_config():
+    gstr = bot.Jid2String(GROUP)
+    # personalidade
+    assert "zoeira" in run("/iamode zoeira").sent[0].lower()
+    assert bot.db.get_setting(gstr, "iamode") == "zoeira"
+    # modelo (inclui gemini)
+    assert run("/aimodel gemini").sent
+    assert bot.db.get_setting(gstr, "aimodel") == "gemini"
+    assert "gemini" in run("/aimodel xpto").sent[0].lower()  # inválido -> ajuda
+    # thinking
+    assert run("/thinking on").sent
+    assert bot.db.get_setting(gstr, "thinking") == "1"
+    run("/thinking off")
+    # nome/bio
+    assert run("/aisetname Thzyx AI").sent
+    assert bot.db.get_setting(gstr, "ainame") == "Thzyx AI"
+    assert run("/aisetbio assistente do grupo").sent
+    # status mostra tudo
+    st = run("/aistatus").sent[0]
+    assert "Thzyx AI" in st and "zoeira" in st and "gemini" in st
+    # reset
+    run("/aireset")
+    assert not bot.db.get_setting(gstr, "ainame")
+    # bloqueio de não-admin
+    assert "admin" in run("/iamode zoeira", admin=False).sent[0].lower()
+    print("✓ IA avançada (iamode/aimodel/thinking/aisetname/bio/status/reset)")
+
+
+def test_pro_admin():
+    gstr = bot.Jid2String(GROUP)
+    assert "mod" in run("/giverole 5511888888888 mod").sent[0]
+    assert "muted" not in bot.db.get_roles(gstr, "5511888888888")
+    assert "mod" in bot.db.get_roles(gstr, "5511888888888")
+    assert run("/massrole vip").sent
+    assert run("/createrole staff").sent
+    assert "staff" in (bot.db.get_setting(gstr, "customroles") or "")
+    assert run("/deleterole staff").sent
+    assert run("/setwelcome Bem-vindo @user!").sent
+    assert bot.db.get_setting(gstr, "welcometext")
+    assert run("/setbye Tchau @user").sent
+    assert run("/autorole membro").sent
+    assert bot.db.get_setting(gstr, "autorole") == "membro"
+    run("/autorole off")
+    assert run("/setmodlog").sent
+    assert run("/softban 5511888888888").sent
+    # tempban registra na banlist
+    run("/tempban 5511888888888 1h")
+    assert bot.db.is_banned(gstr, "5511888888888")
+    bot.db.remove_ban(gstr, "5511888888888")
+    # comandos honestos (não suportados no WhatsApp)
+    assert "WhatsApp" in run("/nickname x").sent[0] or "não" in run("/createchannel x").sent[0].lower()
+    print("✓ admin PRO (giverole/massrole/roles/welcome/bye/autorole/tempban/softban)")
+
+
+def test_pro_general():
+    gstr = bot.Jid2String(GROUP)
+    assert "Senha" in run("/password 20").sent[0]
+    assert run("/quote").sent and run("/fact").sent
+    conv = run("/convert 10 km mi").sent[0]
+    assert "km" in conv and "mi" in conv
+    assert run("/emojify oi").sent
+    assert run("/reverse abc").sent[0].endswith("cba")
+    assert "escolho" in run("/choose a | b | c").sent[0].lower()
+    assert run("/randomnumber 1 10").sent
+    assert "2" in run("/membercount").sent[0]
+    assert run("/randomuser").sent
+    assert run("/sayembed Aviso | Olá").sent
+    assert run("/roleinfo 5511999999999").sent
+    assert run("/stopwatch").sent  # inicia
+    assert "parado" in run("/stopwatch").sent[0].lower()  # para
+    # snipe: simula mensagem apagada
+    bot._last_deleted[gstr] = (bot.Jid2String(OTHER), "mensagem secreta")
+    assert "secreta" in run("/snipe").sent[0]
+    print("✓ gerais PRO (password/convert/emojify/reverse/choose/membercount/snipe...)")
+
+
+def test_pro_games():
+    bot._active_games.clear()
+    # single-shot (random) — só não pode crashar e deve responder
+    one_shot = [
+        "/slot", "/blackjack", "/roulette vermelho", "/crash", "/memory",
+        "/wouldyourather", "/neverhaveiever", "/truth", "/dare", "/battle 5511888888888",
+        "/duel 5511888888888", "/bossfight", "/arena", "/treasurehunt", "/heist",
+        "/escape", "/labyrinth", "/dungeon", "/tower", "/fishing", "/mining",
+        "/hunt", "/petbattle", "/dragonhunt", "/farm", "/race", "/parkour",
+        "/coinwar", "/poker", "/mafia", "/detective", "/spy", "/infected",
+        "/murdermystery", "/zombie", "/survivor", "/kingdom", "/hotpotato",
+    ]
+    for cmd in one_shot:
+        assert run(cmd).sent, f"{cmd} não respondeu"
+    # stateful: inicia e responde
+    bot._active_games.clear()
+    assert "número" in run("/guessnumber").sent[0].lower()
+    assert run("/guessnumber 25").sent
+    bot._active_games.clear()
+    assert run("/mathrace").sent
+    bot._active_games.clear()
+    assert run("/higherlower").sent
+    assert run("/higherlower maior").sent
+    bot._active_games.clear()
+    for g in ("/guessflag", "/guesspokemon", "/guessanime", "/wordchain"):
+        bot._active_games.clear()
+        assert run(g).sent, g
+    print("✓ jogos PRO (50: cassino, RPG, sociais, adivinhação)")
+
+
 if __name__ == "__main__":
     test_utility_commands()
     test_economy_levels()
@@ -366,4 +482,8 @@ if __name__ == "__main__":
     test_global_tools()
     test_antibot_event()
     test_poll_afk()
+    test_ia_config()
+    test_pro_admin()
+    test_pro_general()
+    test_pro_games()
     print("\n✅ TODOS OS COMANDOS TESTADOS COM SUCESSO")

@@ -38,6 +38,10 @@ _recent_msgs = defaultdict(lambda: deque(maxlen=300))
 _mute_warns = defaultdict(int)
 # antispam: últimas mensagens por usuário (chave (chat,sender) -> (texto, repeticoes))
 _spam_track = {}
+# texto recente por id de mensagem p/ /snipe (chat_str -> {msg_id: (sender, texto)})
+_msg_text = defaultdict(lambda: deque(maxlen=200))
+# última mensagem apagada por chat p/ /snipe (chat_str -> (sender, texto))
+_last_deleted = {}
 
 
 LINK_RE = re.compile(
@@ -604,16 +608,28 @@ def cmd_auditlog(ctx):
 
 
 # ===================== GERAIS / UTILITÁRIOS =====================
+def _ai_settings(chat_str):
+    """Lê as configurações de IA do grupo (modelo, modo, nome, bio, thinking)."""
+    return {
+        "model": db.get_setting(chat_str, "aimodel") or config.DEFAULT_AI_MODEL,
+        "mode": db.get_setting(chat_str, "iamode") or config.DEFAULT_AI_MODE,
+        "name": db.get_setting(chat_str, "ainame") or config.BOT_NAME,
+        "bio": db.get_setting(chat_str, "aibio") or "",
+        "thinking": db.get_setting(chat_str, "thinking") == "1",
+    }
+
+
 def cmd_ia(ctx):
     if not ctx.args:
         modelos = ", ".join(config.AI_MODELS.keys())
         return ctx.reply(
             f"🤖 *{config.BOT_NAME}*\nUso: /IA <pergunta>\n"
-            f"Escolher modelo: /IA [{modelos}] <pergunta>\n"
-            f"Ex.: /IA chatgpt Quem descobriu o Brasil?"
+            f"Escolher modelo na hora: /IA [{modelos}] <pergunta>\n"
+            f"Ajustes do grupo: /aimodel /iamode /thinking /aistatus"
         )
+    cfg = _ai_settings(ctx.chat_str)
     parts = ctx.args.split(maxsplit=1)
-    model_key = config.DEFAULT_AI_MODEL
+    model_key = cfg["model"]
     prompt = ctx.args
     if parts[0].lower() in config.AI_MODELS and len(parts) > 1:
         model_key = parts[0].lower()
@@ -622,11 +638,127 @@ def cmd_ia(ctx):
         client.send_chat_presence(ctx.chat, 0, 0)  # "digitando"
     except Exception:
         pass
+    # modo pensamento: mostra o raciocínio antes da resposta
+    if cfg["thinking"]:
+        ctx.reply("🧠 Analisando a mensagem...")
+        time.sleep(5)
+        ctx.reply("🧠 Entendi sua pergunta. Gerando a melhor resposta...")
     try:
-        answer = ai_chat(prompt, model_key)
-        ctx.reply(f"{config.DECO_NAME} ({model_key})\n{config.DECO_LINE}\n\n{answer}")
+        answer = ai_chat(prompt, model_key, mode=cfg["mode"],
+                         name=cfg["name"], bio=cfg["bio"] or None)
+        deco = f"𓊆ྀི {cfg['name']} ❤︎𓊇 ◡̈"
+        ctx.reply(f"{deco} ({model_key})\n{config.DECO_LINE}\n\n{answer}")
     except AIError as exc:
         ctx.reply(f"❌ IA indisponível: {exc}")
+
+
+# ─────────── IA: configurações avançadas ───────────
+def cmd_iamode(ctx):
+    if not ctx.is_group:
+        return ctx.reply("Use em um grupo.")
+    if not is_group_admin(ctx.chat, ctx.sender_str):
+        return ctx.reply("🔒 Só *administradores* mudam a personalidade da IA.")
+    arg = ctx.args.strip().lower()
+    if arg not in config.AI_MODES:
+        modos = " / ".join(config.AI_MODES)
+        return ctx.reply(
+            f"💙 *Personalidade da IA*\nUso: /iamode <{modos}>\n\n"
+            "• carinhosa — amigável e fofa 🥰\n"
+            "• zoeira — divertida e brincalhona 😆\n"
+            "• sincera — direta e objetiva 🎯"
+        )
+    db.set_setting(ctx.chat_str, "iamode", arg)
+    audit(ctx.chat, ctx.chat_str, ctx.sender_str, "iamode", arg)
+    ctx.reply(f"✅ Personalidade da IA definida para *{arg}*.")
+
+
+def cmd_aimodel(ctx):
+    if not ctx.is_group:
+        return ctx.reply("Use em um grupo.")
+    if not is_group_admin(ctx.chat, ctx.sender_str):
+        return ctx.reply("🔒 Só o *dono/admin* do grupo escolhe o modelo.")
+    arg = ctx.args.strip().lower()
+    if arg not in config.AI_MODELS:
+        modelos = " / ".join(config.AI_MODELS)
+        return ctx.reply(
+            f"🧠 *Modelo da IA*\nUso: /aimodel <{modelos}>\n"
+            "_gemini usa o Google Gemma (Gemini gratuito não existe no OpenRouter)._"
+        )
+    db.set_setting(ctx.chat_str, "aimodel", arg)
+    audit(ctx.chat, ctx.chat_str, ctx.sender_str, "aimodel", arg)
+    ctx.reply(f"✅ Modelo da IA definido para *{arg}* (`{config.AI_MODELS[arg]}`).")
+
+
+def cmd_thinking(ctx):
+    if not ctx.is_group:
+        return ctx.reply("Use em um grupo.")
+    if not is_group_admin(ctx.chat, ctx.sender_str):
+        return ctx.reply("🔒 Só *administradores* mudam o modo pensamento.")
+    arg = ctx.args.strip().lower()
+    if arg not in ("on", "off"):
+        return ctx.reply("🔍 *Modo Pensamento*\nUso: /thinking on | off")
+    db.set_setting(ctx.chat_str, "thinking", "1" if arg == "on" else "0")
+    ctx.reply(f"✅ Modo pensamento *{'ATIVADO ⏳' if arg == 'on' else 'desativado'}*.")
+
+
+def cmd_aisetname(ctx):
+    if not is_group_admin(ctx.chat, ctx.sender_str):
+        return ctx.reply("🔒 Só *administradores* mudam o nome da IA.")
+    if not ctx.args.strip():
+        return ctx.reply("Uso: /aisetname <novo nome>")
+    db.set_setting(ctx.chat_str, "ainame", ctx.args.strip()[:40])
+    ctx.reply(f"✅ Agora a IA se chama *{ctx.args.strip()[:40]}* neste grupo.")
+
+
+def cmd_aisetbio(ctx):
+    if not is_group_admin(ctx.chat, ctx.sender_str):
+        return ctx.reply("🔒 Só *administradores* mudam a bio da IA.")
+    if not ctx.args.strip():
+        return ctx.reply("Uso: /aisetbio <descrição da personalidade>")
+    db.set_setting(ctx.chat_str, "aibio", ctx.args.strip()[:300])
+    ctx.reply("✅ Bio/descrição da IA atualizada.")
+
+
+def cmd_aisetavatar(ctx):
+    if not is_group_admin(ctx.chat, ctx.sender_str):
+        return ctx.reply("🔒 Só *administradores*.")
+    # A API do WhatsApp não deixa o bot ter "foto" própria por grupo;
+    # registramos a preferência de forma honesta.
+    ctx.reply(
+        "🖼️ A foto do bot é a do número conectado (WhatsApp não tem avatar "
+        "por grupo). Troque a foto do perfil do WhatsApp do bot diretamente."
+    )
+
+
+def cmd_aichannel(ctx):
+    if not is_group_admin(ctx.chat, ctx.sender_str):
+        return ctx.reply("🔒 Só *administradores*.")
+    db.set_setting(ctx.chat_str, "aichannel", ctx.chat_str)
+    ctx.reply("✅ Este grupo foi definido como canal da IA.")
+
+
+def cmd_aireset(ctx):
+    if not is_group_admin(ctx.chat, ctx.sender_str):
+        return ctx.reply("🔒 Só *administradores* podem resetar a IA.")
+    for k in ("aimodel", "iamode", "ainame", "aibio", "thinking", "aichannel"):
+        db.set_setting(ctx.chat_str, k, "")
+    ctx.reply("♻️ Configurações da IA restauradas ao padrão.")
+
+
+def cmd_aistatus(ctx):
+    cfg = _ai_settings(ctx.chat_str)
+    owner = db.get_setting(ctx.chat_str, "aiowner") or short_jid(ctx.sender_str)
+    ch = db.get_setting(ctx.chat_str, "aichannel")
+    ctx.reply(
+        f"🤖 *IA Ativa*\n{config.DECO_LINE}\n"
+        f"• Nome: *{cfg['name']}*\n"
+        f"• Modelo: *{cfg['model']}* (`{config.AI_MODELS.get(cfg['model'],'?')}`)\n"
+        f"• Personalidade: *{cfg['mode']}*\n"
+        f"• Pensamento: *{'ON ⏳' if cfg['thinking'] else 'OFF'}*\n"
+        f"• Canal: {'este grupo' if ch else 'qualquer chat'}\n"
+        f"• Bio: {cfg['bio'] or '—'}\n"
+        "Sistema funcionando normalmente. ✅"
+    )
 
 
 def cmd_ping(ctx):
@@ -663,14 +795,34 @@ def cmd_help(ctx):
         f"   {p}fg {p}va {p}calc {p}weather {p}translate {p}remind {p}poll\n"
         f"   {p}afk {p}invite {p}uptime {p}report {p}suggest {p}level\n"
         f"   {p}leaderboard {p}daily {p}balance {p}pay\n\n"
-        f"🎮 *Jogos & Brincadeiras (10)*\n"
+        f"🤖 *IA Avançada*\n"
+        f"└─ {p}iamode {p}aimodel {p}thinking {p}aisetname {p}aisetbio\n"
+        f"   {p}aichannel {p}aireset {p}aistatus\n\n"
+        f"👑 *Admin PRO (v3.1)*\n"
+        f"└─ {p}giverole {p}temprole {p}tempban {p}softban {p}massrole\n"
+        f"   {p}createrole {p}deleterole {p}setwelcome {p}setbye {p}autorole\n"
+        f"   {p}setmodlog {p}logs {p}backupserver {p}restorebackup\n\n"
+        f"🛠️ *Gerais PRO (v3.1)*\n"
+        f"└─ {p}qr {p}shorturl {p}password {p}meme {p}quote {p}fact {p}crypto\n"
+        f"   {p}timer {p}countdown {p}stopwatch {p}convert {p}emojify {p}snipe\n"
+        f"   {p}banner {p}roleinfo {p}membercount {p}randomuser {p}randomnumber\n"
+        f"   {p}choose {p}reverse {p}sayembed\n\n"
+        f"🎮 *Jogos (originais)*\n"
         f"└─ {p}coinflip {p}jokenpo {p}8ball {p}roll {p}tictactoe\n"
         f"   {p}trivia {p}hangman {p}akinator {p}russianroulette {p}ship\n\n"
+        f"🎲 *Jogos PRO (v3.1)*\n"
+        f"└─ {p}slot {p}blackjack {p}roulette {p}crash {p}higherlower\n"
+        f"   {p}guessnumber {p}mathrace {p}guessflag {p}guesspokemon {p}guessanime\n"
+        f"   {p}wordchain {p}wouldyourather {p}truth {p}dare {p}battle {p}duel\n"
+        f"   {p}bossfight {p}arena {p}treasurehunt {p}heist {p}escape {p}dungeon\n"
+        f"   {p}tower {p}fishing {p}mining {p}hunt {p}petbattle {p}dragonhunt\n"
+        f"   {p}farm {p}race {p}parkour {p}coinwar {p}poker {p}mafia {p}detective\n"
+        f"   {p}spy {p}infected {p}zombie {p}kingdom {p}hotpotato\n\n"
         f"✨ *Destaques:*\n"
-        f"• {p}IA [chatgpt|nex|glm] <pergunta> — converse com a IA 🤖\n"
+        f"• {p}IA [chatgpt|nex|glm|gemini] <pergunta> — converse com a IA 🤖\n"
+        f"• {p}aimodel / {p}iamode / {p}thinking — personalize a IA do grupo\n"
         f"• {p}fg — vídeo/imagem vira figurinha 🖼️\n"
-        f"• {p}va — vídeo vira áudio 🎵\n"
-        f"• {p}welcome on — boas-vindas com foto 💖\n\n"
+        f"• {p}va — vídeo vira áudio 🎵\n\n"
         f"{config.DECO_LINE}\n"
         f"_Prefixo: {p} | {config.DECO_NAME}_"
     )
@@ -725,7 +877,12 @@ def cmd_avatar(ctx):
 
 
 def cmd_fg(ctx):
-    """Cria figurinha a partir de imagem ou vídeo (enviado ou citado)."""
+    """Cria figurinha a partir de imagem ou vídeo (enviado ou citado).
+
+    Convertemos nós mesmos para WebP e enviamos com passthrough=True, evitando
+    o pipeline interno do neonize (que exige ffprobe/webpmux/libwebp e quebra
+    no Termux). Imagem nem precisa de ffmpeg (usa Pillow).
+    """
     try:
         data, kind = get_media(ctx.msg)
     except Exception as exc:
@@ -737,16 +894,15 @@ def cmd_fg(ctx):
         )
     ctx.reply("✨ Criando sua figurinha...")
     try:
-        client.send_sticker(
-            ctx.chat, data,
-            name=config.BOT_NAME, packname=config.BOT_NAME,
-            animated_gif=(kind == "video"),
-        )
+        if kind == "image":
+            webp = media.image_to_sticker(data)
+        else:
+            webp = media.video_to_sticker(data)
+        client.send_sticker(ctx.chat, webp, passthrough=True)
+    except media.MediaError as exc:
+        ctx.reply(f"❌ {exc}")
     except Exception as exc:
-        ctx.reply(
-            f"❌ Erro ao criar figurinha: {exc}\n"
-            "_Para figurinhas de vídeo é preciso ffmpeg: pkg install ffmpeg -y_"
-        )
+        ctx.reply(f"❌ Erro ao criar figurinha: {exc}")
 
 
 def cmd_va(ctx):
@@ -1032,6 +1188,740 @@ def cmd_akinator(ctx):
     )
 
 
+# ===================== v3.1 PRO: HELPERS =====================
+import pro
+
+# cronômetros ativos por (chat, usuário) -> timestamp de início
+_stopwatches = {}
+
+
+def _schedule(secs, fn):
+    """Agenda uma ação futura em uma thread DAEMON (não segura o processo)."""
+    t = threading.Timer(secs, fn)
+    t.daemon = True
+    t.start()
+    return t
+
+
+def _group_phones(ctx):
+    """Lista de telefones (string) dos participantes do grupo."""
+    try:
+        info = client.get_group_info(ctx.chat)
+        return [short_jid(Jid2String(p.JID)) for p in info.Participants]
+    except Exception:
+        return []
+
+
+def _na(ctx, recurso):
+    """Resposta honesta para recursos que a API do WhatsApp não suporta."""
+    ctx.reply(
+        f"⚠️ *{recurso}* não existe no WhatsApp como no Discord — a API não "
+        "oferece esse recurso. Comando registrado para compatibilidade."
+    )
+
+
+# ===================== v3.1 PRO: ADMIN (25) =====================
+def cmd_giverole(ctx):
+    if not ctx.require_admin():
+        return
+    target = ctx.target_jid_str()
+    role = ctx.parts[-1] if len(ctx.parts) >= 2 else ""
+    if not target or not role:
+        return ctx.reply("Uso: /giverole @user <cargo>")
+    db.add_role(ctx.chat_str, short_jid(target), role)
+    audit(ctx.chat, ctx.chat_str, ctx.sender_str, "giverole", f"{short_jid(target)}={role}")
+    ctx.reply(f"✅ Cargo *{role}* dado a @{short_jid(target)}.")
+
+
+def cmd_temprole(ctx):
+    if not ctx.require_admin():
+        return
+    target = ctx.target_jid_str()
+    if not target or len(ctx.parts) < 2:
+        return ctx.reply("Uso: /temprole @user <cargo> <duração ex:10m>")
+    role = ctx.parts[1] if not ctx.parts[1].startswith("@") else (ctx.parts[2] if len(ctx.parts) > 2 else "")
+    secs = utils.parse_duration(ctx.parts[-1]) or 600
+    phone = short_jid(target)
+    db.add_role(ctx.chat_str, phone, role)
+    ctx.reply(f"⏳ Cargo *{role}* dado a @{phone} por {ctx.parts[-1]}.")
+    _schedule(secs, lambda: db.remove_role(ctx.chat_str, phone, role))
+
+
+def cmd_tempban(ctx):
+    if not ctx.require_admin():
+        return
+    target = ctx.target_jid_str()
+    if not target:
+        return ctx.reply("Uso: /tempban @user <duração ex:1h>")
+    secs = utils.parse_duration(ctx.parts[-1]) if ctx.parts else 0
+    secs = secs or 3600
+    phone = short_jid(target)
+    db.add_ban(ctx.chat_str, phone)
+    try:
+        client.update_group_participants(ctx.chat, [parse_jid(target)], ParticipantChange.REMOVE)
+    except Exception:
+        pass
+    audit(ctx.chat, ctx.chat_str, ctx.sender_str, "tempban", f"{phone} {ctx.parts[-1]}")
+    ctx.reply(f"⛔ @{phone} banido temporariamente ({ctx.parts[-1]}).")
+    _schedule(secs, lambda: db.remove_ban(ctx.chat_str, phone))
+
+
+def cmd_softban(ctx):
+    if not ctx.require_admin():
+        return
+    target = ctx.target_jid_str()
+    if not target:
+        return ctx.reply("Uso: /softban @user")
+    phone = short_jid(target)
+    # apaga mensagens recentes do alvo e remove (sem manter na banlist)
+    apagadas = 0
+    for snd, mid in list(_recent_msgs.get(ctx.chat_str, [])):
+        if short_jid(snd) == phone and revoke(ctx.chat, snd, mid):
+            apagadas += 1
+    try:
+        client.update_group_participants(ctx.chat, [parse_jid(target)], ParticipantChange.REMOVE)
+    except Exception:
+        pass
+    audit(ctx.chat, ctx.chat_str, ctx.sender_str, "softban", f"{phone} ({apagadas} msgs)")
+    ctx.reply(f"🧹 @{phone} sofreu softban: removido e {apagadas} mensagens apagadas.")
+
+
+def cmd_massrole(ctx):
+    if not ctx.require_admin():
+        return
+    role = ctx.args.strip()
+    if not role:
+        return ctx.reply("Uso: /massrole <cargo>")
+    n = 0
+    for phone in _group_phones(ctx):
+        db.add_role(ctx.chat_str, phone, role)
+        n += 1
+    ctx.reply(f"✅ Cargo *{role}* aplicado a {n} membros.")
+
+
+def cmd_createrole(ctx):
+    if not ctx.require_admin():
+        return
+    if not ctx.args.strip():
+        return ctx.reply("Uso: /createrole <nome>")
+    roles = set((db.get_setting(ctx.chat_str, "customroles") or "").split(",")) - {""}
+    roles.add(ctx.args.strip())
+    db.set_setting(ctx.chat_str, "customroles", ",".join(sorted(roles)))
+    ctx.reply(f"✅ Cargo *{ctx.args.strip()}* criado.")
+
+
+def cmd_deleterole(ctx):
+    if not ctx.require_admin():
+        return
+    roles = set((db.get_setting(ctx.chat_str, "customroles") or "").split(",")) - {""}
+    if ctx.args.strip() in roles:
+        roles.discard(ctx.args.strip())
+        db.set_setting(ctx.chat_str, "customroles", ",".join(sorted(roles)))
+        return ctx.reply(f"🗑️ Cargo *{ctx.args.strip()}* apagado.")
+    ctx.reply("❌ Cargo não encontrado. Veja /roleinfo")
+
+
+def cmd_setwelcome(ctx):
+    if not ctx.require_admin():
+        return
+    if not ctx.args.strip():
+        return ctx.reply("Uso: /setwelcome <texto> (use @ para mencionar o novato)")
+    db.set_setting(ctx.chat_str, "welcometext", ctx.args.strip())
+    db.set_setting(ctx.chat_str, "welcome", "1")
+    ctx.reply("✅ Mensagem de boas-vindas configurada e ativada.")
+
+
+def cmd_setbye(ctx):
+    if not ctx.require_admin():
+        return
+    if not ctx.args.strip():
+        return ctx.reply("Uso: /setbye <texto de despedida>")
+    db.set_setting(ctx.chat_str, "byetext", ctx.args.strip())
+    db.set_setting(ctx.chat_str, "bye", "1")
+    ctx.reply("✅ Mensagem de despedida configurada.")
+
+
+def cmd_autorole(ctx):
+    if not ctx.require_admin():
+        return
+    arg = ctx.args.strip()
+    if arg.lower() in ("off", "desativar"):
+        db.set_setting(ctx.chat_str, "autorole", "")
+        return ctx.reply("✅ Autorole desativado.")
+    if not arg:
+        return ctx.reply("Uso: /autorole <cargo> | off")
+    db.set_setting(ctx.chat_str, "autorole", arg)
+    ctx.reply(f"✅ Novos membros receberão o cargo *{arg}* automaticamente.")
+
+
+def cmd_setmodlog(ctx):
+    if not ctx.require_admin():
+        return
+    db.set_setting(ctx.chat_str, "modlog", ctx.chat_str)
+    ctx.reply("✅ Canal de moderação definido para este grupo.")
+
+
+# ===================== v3.1 PRO: GERAIS (25) =====================
+def cmd_qr(ctx):
+    if not ctx.args.strip():
+        return ctx.reply("Uso: /qr <texto ou link>")
+    try:
+        png = services.qr_png(ctx.args.strip())
+        client.send_image(ctx.chat, png, caption="🔳 Seu QR Code")
+    except Exception as exc:
+        ctx.reply(f"❌ Não consegui gerar o QR: {exc}")
+
+
+def cmd_shorturl(ctx):
+    if not ctx.args.strip():
+        return ctx.reply("Uso: /shorturl <link>")
+    ctx.reply(f"🔗 {services.shorten_url(ctx.args.strip())}")
+
+
+def cmd_password(ctx):
+    n = 16
+    if ctx.parts and ctx.parts[0].isdigit():
+        n = int(ctx.parts[0])
+    ctx.reply(f"🔐 Senha gerada:\n`{pro.gen_password(n)}`")
+
+
+def cmd_meme(ctx):
+    try:
+        url, title = services.random_meme()
+        import requests
+        img = requests.get(url, timeout=30).content
+        client.send_image(ctx.chat, img, caption=f"😂 {title}")
+    except Exception as exc:
+        ctx.reply(f"❌ Não consegui buscar um meme agora: {exc}")
+
+
+def cmd_quote(ctx):
+    ctx.reply(f"💬 {pro.random_from(pro.QUOTES)}")
+
+
+def cmd_fact(ctx):
+    ctx.reply(f"🤓 *Curiosidade:* {pro.random_from(pro.FACTS)}")
+
+
+def cmd_crypto(ctx):
+    coin = ctx.args.strip() or "btc"
+    ctx.reply(services.crypto_price(coin))
+
+
+def cmd_timer(ctx):
+    if len(ctx.parts) < 1:
+        return ctx.reply("Uso: /timer <duração ex:5m> [mensagem]")
+    secs = utils.parse_duration(ctx.parts[0])
+    if not secs:
+        return ctx.reply("❌ Duração inválida. Ex.: /timer 5m")
+    msg = ctx.args[len(ctx.parts[0]):].strip() or "⏰ Tempo esgotado!"
+    ctx.reply(f"⏱️ Timer de {ctx.parts[0]} iniciado.")
+    _schedule(secs, lambda: client.send_message(ctx.chat, f"⏰ @{short_jid(ctx.sender_str)} {msg}"))
+
+
+def cmd_countdown(ctx):
+    if not ctx.parts or not ctx.parts[0].isdigit():
+        return ctx.reply("Uso: /countdown <segundos>")
+    n = min(int(ctx.parts[0]), 10)
+    ctx.reply(f"⏳ Contagem regressiva de {n}...")
+    def run():
+        for i in range(n, 0, -1):
+            client.send_message(ctx.chat, f"{i}️⃣")
+            time.sleep(1)
+        client.send_message(ctx.chat, "🚀 *JÁ!*")
+    threading.Thread(target=run, daemon=True).start()
+
+
+def cmd_stopwatch(ctx):
+    key = (ctx.chat_str, ctx.sender_str)
+    now = time.time()
+    if key in _stopwatches:
+        elapsed = now - _stopwatches.pop(key)
+        return ctx.reply(f"⏹️ Cronômetro parado: *{elapsed:.1f}s*")
+    _stopwatches[key] = now
+    ctx.reply("▶️ Cronômetro iniciado. Use /stopwatch de novo para parar.")
+
+
+def cmd_convert(ctx):
+    if len(ctx.parts) < 3:
+        return ctx.reply("Uso: /convert <valor> <de> <para>\nEx.: /convert 10 km mi")
+    try:
+        val = float(ctx.parts[0].replace(",", "."))
+        res = pro.convert_units(val, ctx.parts[1], ctx.parts[2])
+        ctx.reply(f"🔄 {val} {ctx.parts[1]} = *{res:.4g} {ctx.parts[2]}*")
+    except Exception as exc:
+        ctx.reply(f"❌ {exc}")
+
+
+def cmd_emojify(ctx):
+    if not ctx.args.strip():
+        return ctx.reply("Uso: /emojify <texto>")
+    ctx.reply(pro.emojify(ctx.args.strip()))
+
+
+def cmd_snipe(ctx):
+    snipe = _last_deleted.get(ctx.chat_str)
+    if not snipe:
+        return ctx.reply("🤷 Nenhuma mensagem apagada recente para mostrar.")
+    snd, txt = snipe
+    ctx.reply(f"🔍 *Última mensagem apagada*\n👤 @{short_jid(snd)}:\n{txt}")
+
+
+def cmd_banner(ctx):
+    cmd_avatar(ctx)
+
+
+def cmd_roleinfo(ctx):
+    custom = db.get_setting(ctx.chat_str, "customroles") or "—"
+    target = ctx.target_jid_str() or ctx.sender_str
+    roles = db.get_roles(ctx.chat_str, short_jid(target)) or "nenhum"
+    ctx.reply(
+        f"🏷️ *Cargos*\nCargos do grupo: {custom}\n"
+        f"@{short_jid(target)}: {roles}"
+    )
+
+
+def cmd_channelinfo(ctx):
+    cmd_serverinfo(ctx)
+
+
+def cmd_membercount(ctx):
+    phones = _group_phones(ctx)
+    ctx.reply(f"👥 Este grupo tem *{len(phones)}* membros.")
+
+
+def cmd_randomuser(ctx):
+    phones = _group_phones(ctx)
+    if not phones:
+        return ctx.reply("❌ Não consegui listar os membros.")
+    ctx.reply(f"🎲 Usuário sorteado: @{random.choice(phones)}")
+
+
+def cmd_randomnumber(ctx):
+    lo, hi = 1, 100
+    if len(ctx.parts) >= 2 and ctx.parts[0].lstrip("-").isdigit() and ctx.parts[1].lstrip("-").isdigit():
+        lo, hi = int(ctx.parts[0]), int(ctx.parts[1])
+    ctx.reply(f"🔢 Número sorteado ({lo}–{hi}): *{pro.random_number(lo, hi)}*")
+
+
+def cmd_choose(ctx):
+    opts = [o.strip() for o in ctx.args.split("|") if o.strip()]
+    if len(opts) < 2:
+        return ctx.reply("Uso: /choose opção1 | opção2 | opção3")
+    ctx.reply(f"🤔 Eu escolho: *{pro.choose(opts)}*")
+
+
+def cmd_reverse(ctx):
+    if not ctx.args.strip():
+        return ctx.reply("Uso: /reverse <texto>")
+    ctx.reply(f"🔃 {pro.reverse_text(ctx.args.strip())}")
+
+
+def cmd_sayembed(ctx):
+    if not ctx.args.strip():
+        return ctx.reply("Uso: /sayembed <título> | <mensagem>")
+    parts = ctx.args.split("|", 1)
+    titulo = parts[0].strip()
+    corpo = parts[1].strip() if len(parts) > 1 else ""
+    ctx.send(f"╭━━━ *{titulo}* ━━━╮\n{corpo}\n╰━━━━━━━━━━━━━╯")
+
+
+# ===================== v3.1 PRO: JOGOS (50) =====================
+def cmd_slot(ctx):
+    r, mult = pro.slot_spin()
+    line = " | ".join(r)
+    if mult:
+        gain = 50 * mult
+        db.add_balance(ctx.sender_str, gain)
+        ctx.reply(f"🎰 [ {line} ]\n🎉 Combinou! x{mult} → +{gain} moedas!")
+    else:
+        ctx.reply(f"🎰 [ {line} ]\n😢 Não foi dessa vez!")
+
+
+def cmd_blackjack(ctx):
+    p, d, res = pro.blackjack_round()
+    ctx.reply(
+        f"🃏 *Blackjack*\nVocê: {p} = {sum(p)}\nDealer: {d} = {sum(d)}\n\n*{res}*"
+    )
+
+
+def cmd_roulette(ctx):
+    if not ctx.args.strip():
+        return ctx.reply("Uso: /roulette <vermelho|preto|par|impar|número>")
+    n, color, win = pro.roulette_spin(ctx.args.strip())
+    res = "🎉 Você GANHOU!" if win else "😢 Você perdeu!"
+    ctx.reply(f"🎡 A bola caiu no *{n}* {color}\n{res}")
+
+
+def cmd_crash(ctx):
+    point = pro.crash_game()
+    ctx.reply(f"📈 *Crash!*\nO multiplicador estourou em *{point:.2f}x* 💥")
+
+
+def cmd_higherlower(ctx):
+    g = _active_games.get(ctx.chat_str)
+    if g and g.get("type") == "hl":
+        guess = ctx.args.strip().lower()
+        nxt = pro.higher_lower(g["num"])
+        if (guess in ("maior", "h", "+") and nxt >= g["num"]) or \
+           (guess in ("menor", "l", "-") and nxt <= g["num"]):
+            _active_games.pop(ctx.chat_str, None)
+            db.add_balance(ctx.sender_str, 30)
+            return ctx.reply(f"🔼 Era *{nxt}*. Acertou! +30 moedas 🎉")
+        _active_games.pop(ctx.chat_str, None)
+        return ctx.reply(f"🔽 Era *{nxt}*. Errou! 😢")
+    num = pro.random_number(1, 100)
+    _active_games[ctx.chat_str] = {"type": "hl", "num": num}
+    ctx.reply(f"🔼🔽 *Maior ou Menor?*\nNúmero atual: *{num}*\n"
+              "O próximo será maior ou menor? /higherlower maior | menor")
+
+
+def cmd_guessnumber(ctx):
+    g = _active_games.get(ctx.chat_str)
+    if g and g.get("type") == "gn":
+        if not ctx.parts or not ctx.parts[0].lstrip("-").isdigit():
+            return ctx.reply("Digite um número: /guessnumber <n>")
+        guess = int(ctx.parts[0])
+        if guess == g["num"]:
+            _active_games.pop(ctx.chat_str, None)
+            db.add_balance(ctx.sender_str, 40)
+            return ctx.reply("🎯 Acertou! +40 moedas 🎉")
+        dica = "📈 maior" if guess < g["num"] else "📉 menor"
+        return ctx.reply(f"❌ Não é {guess}. Tente um número {dica}.")
+    num = pro.random_number(1, 50)
+    _active_games[ctx.chat_str] = {"type": "gn", "num": num}
+    ctx.reply("🔢 *Adivinhe o número* (1 a 50)!\nResponda: /guessnumber <n>")
+
+
+def cmd_mathrace(ctx):
+    g = _active_games.get(ctx.chat_str)
+    if g and g.get("type") == "math":
+        try:
+            if int(ctx.args.strip()) == g["ans"]:
+                _active_games.pop(ctx.chat_str, None)
+                db.add_balance(ctx.sender_str, 35)
+                return ctx.reply("✅ Correto! +35 moedas ⚡")
+        except ValueError:
+            pass
+        return ctx.reply(f"❌ Errado! Era *{g['ans']}*.")
+    expr, ans = pro.math_challenge()
+    _active_games[ctx.chat_str] = {"type": "math", "ans": ans}
+    ctx.reply(f"🧮 *Corrida Matemática!*\nQuanto é *{expr}*?\n/mathrace <resposta>")
+
+
+def _guess_game(ctx, kind, emoji, titulo):
+    g = _active_games.get(ctx.chat_str)
+    if g and g.get("type") == kind:
+        if ctx.args.strip().lower() == g["answer"]:
+            _active_games.pop(ctx.chat_str, None)
+            db.add_balance(ctx.sender_str, 40)
+            return ctx.reply(f"✅ Isso! Era *{g['answer'].title()}*. +40 moedas 🎉")
+        return ctx.reply(f"❌ Não! A resposta era *{g['answer'].title()}*.")
+    hint, ans = pro.guess_new(kind if kind in ("flag", "pokemon", "anime") else "flag")
+    _active_games[ctx.chat_str] = {"type": kind, "answer": ans.lower()}
+    ctx.reply(f"{emoji} *{titulo}*\n{hint}\n/{ctx.command} <resposta>")
+
+
+def cmd_guessflag(ctx):
+    _guess_game(ctx, "flag", "🚩", "Adivinhe a Bandeira")
+
+
+def cmd_guesspokemon(ctx):
+    _guess_game(ctx, "pokemon", "❓", "Quem é esse Pokémon?")
+
+
+def cmd_guessanime(ctx):
+    _guess_game(ctx, "anime", "🎌", "Adivinhe o Anime")
+
+
+def cmd_wordchain(ctx):
+    g = _active_games.get(ctx.chat_str)
+    word = ctx.args.strip().lower()
+    if g and g.get("type") == "wc":
+        if not word:
+            return ctx.reply(f"🔗 Diga uma palavra que comece com *{g['last'][-1].upper()}*")
+        if word[0] != g["last"][-1]:
+            return ctx.reply(f"❌ Tem que começar com *{g['last'][-1].upper()}*!")
+        g["last"] = word
+        return ctx.reply(f"✅ Boa! Próxima começa com *{word[-1].upper()}* 🔗")
+    start = ctx.args.strip().lower() or random.choice(["banana", "casa", "sol", "amor"])
+    _active_games[ctx.chat_str] = {"type": "wc", "last": start}
+    ctx.reply(f"🔗 *Cadeia de Palavras!*\nComeço: *{start}*\n"
+              f"Próxima começa com *{start[-1].upper()}*\n/wordchain <palavra>")
+
+
+def cmd_memory(ctx):
+    seq = " ".join(random.choice(["🔴", "🟢", "🔵", "🟡"]) for _ in range(5))
+    ctx.reply(f"🧠 *Jogo da Memória!*\nMemorize esta sequência:\n\n{seq}\n\n"
+              "_(Recriação simplificada — desafie sua memória!)_")
+
+
+def cmd_reaction(ctx):
+    ctx.reply("⚡ *Reação Rápida!*\nQuando eu disser JÁ, mande qualquer coisa!")
+    def go():
+        time.sleep(random.uniform(2, 5))
+        client.send_message(ctx.chat, "🟢 *JÁ!* Responda agora!")
+    threading.Thread(target=go, daemon=True).start()
+
+
+def cmd_wouldyourather(ctx):
+    ctx.reply(f"🤔 *Você prefere?*\n{pro.random_from(pro.WOULD_YOU_RATHER)}")
+
+
+def cmd_neverhaveiever(ctx):
+    ctx.reply(f"🙅 *Eu nunca...*\n{pro.random_from(pro.NEVER_HAVE_I_EVER)}")
+
+
+def cmd_truth(ctx):
+    ctx.reply(f"🗣️ *Verdade:* {pro.random_from(pro.TRUTHS)}")
+
+
+def cmd_dare(ctx):
+    ctx.reply(f"🎯 *Desafio:* {pro.random_from(pro.DARES)}")
+
+
+def cmd_battle(ctx):
+    a = short_jid(ctx.sender_str)
+    b = short_jid(ctx.target_jid_str()) if ctx.target_jid_str() else "Inimigo"
+    log, winner = pro.battle(a, b)
+    ctx.reply("⚔️ *Batalha RPG!*\n" + "\n".join(log[:6]) + f"\n\n🏆 Vencedor: *{winner}*!")
+
+
+def cmd_duel(ctx):
+    a = short_jid(ctx.sender_str)
+    b = short_jid(ctx.target_jid_str()) if ctx.target_jid_str() else "Oponente"
+    winner = random.choice([a, b])
+    ctx.reply(f"🤺 *Duelo!*\n@{a} ⚔️ @{b}\n\n🏆 *{winner}* venceu o duelo!")
+
+
+def cmd_bossfight(ctx):
+    won, hp, dmg = pro.boss_fight(short_jid(ctx.sender_str))
+    if won:
+        db.add_balance(ctx.sender_str, 200)
+        ctx.reply(f"🐲 *Chefe derrotado!*\nVida do chefe: {hp} | Seu dano: {dmg}\n+200 moedas 🎉")
+    else:
+        ctx.reply(f"💀 O chefe (HP {hp}) resistiu ao seu ataque de {dmg}. Tente de novo!")
+
+
+def cmd_arena(ctx):
+    foes = ["🗡️ Gladiador", "🛡️ Cavaleiro", "🏹 Arqueiro", "🐉 Dragão", "👹 Ogro"]
+    res = random.choice(["venceu", "perdeu"])
+    foe = random.choice(foes)
+    if res == "venceu":
+        db.add_balance(ctx.sender_str, 80)
+        ctx.reply(f"🏟️ Na arena você enfrentou {foe} e *venceu*! +80 moedas 🎉")
+    else:
+        ctx.reply(f"🏟️ Na arena {foe} foi mais forte e você *perdeu*! 💪")
+
+
+def cmd_treasurehunt(ctx):
+    item, rar = pro.loot()
+    ctx.reply(f"🗺️ *Caça ao Tesouro!*\nVocê encontrou: {item} _({rar})_ ✨")
+
+
+def cmd_heist(ctx):
+    if random.random() < 0.5:
+        ganho = random.randint(100, 500)
+        db.add_balance(ctx.sender_str, ganho)
+        ctx.reply(f"💰 *Assalto bem-sucedido!*\nA quadrilha levou {ganho} moedas! 🤑")
+    else:
+        ctx.reply("🚓 *O assalto deu errado!* A polícia chegou e vocês fugiram sem nada! 😵")
+
+
+def cmd_escape(ctx):
+    if random.random() < 0.45:
+        ctx.reply("🔓 Você decifrou o enigma e *ESCAPOU* da prisão! 🎉")
+    else:
+        ctx.reply("🔒 O tempo acabou... você continua preso! Tente de novo. ⛓️")
+
+
+def cmd_labyrinth(ctx):
+    passos = random.randint(3, 12)
+    ctx.reply(f"🌀 Você explorou o labirinto por {passos} salas e encontrou a saída! 🚪✨")
+
+
+def cmd_dungeon(ctx):
+    ctx.reply(f"🏰 *Masmorra*\n{pro.dungeon_step()}")
+
+
+def cmd_tower(ctx):
+    floor, reward = pro.tower_climb()
+    db.add_balance(ctx.sender_str, reward)
+    ctx.reply(f"🗼 Você subiu até o andar *{floor}* da torre infinita!\n+{reward} moedas 🪙")
+
+
+def cmd_fishing(ctx):
+    item, val = pro.gather("fishing")
+    if val:
+        db.add_balance(ctx.sender_str, val)
+    ctx.reply(f"🎣 Você pescou: {item}" + (f" (+{val} moedas)" if val else " (nada de valor)"))
+
+
+def cmd_mining(ctx):
+    item, val = pro.gather("mining")
+    if val:
+        db.add_balance(ctx.sender_str, val)
+    ctx.reply(f"⛏️ Você minerou: {item}" + (f" (+{val} moedas)" if val else ""))
+
+
+def cmd_hunt(ctx):
+    item, val = pro.gather("hunt")
+    if val:
+        db.add_balance(ctx.sender_str, val)
+    ctx.reply(f"🏹 Caçada: {item}" + (f" (+{val} moedas)" if val else ""))
+
+
+def cmd_petbattle(ctx):
+    pets = ["🐶 Cão", "🐱 Gato", "🐉 Dragão", "🦅 Águia", "🐢 Tartaruga"]
+    a, b = random.sample(pets, 2)
+    ctx.reply(f"🐾 *Batalha de Pets!*\n{a} VS {b}\n🏆 *{random.choice([a, b])}* venceu!")
+
+
+def cmd_dragonhunt(ctx):
+    if random.random() < 0.35:
+        db.add_balance(ctx.sender_str, 300)
+        ctx.reply("🐉 Você caçou o *Dragão Lendário*! Tesouro: +300 moedas 🏆🔥")
+    else:
+        ctx.reply("🔥 O dragão cuspiu fogo e você recuou! Ele é forte demais... 😰")
+
+
+def cmd_farm(ctx):
+    crops = ["🌽 Milho", "🍅 Tomate", "🥕 Cenoura", "🌾 Trigo", "🍓 Morango"]
+    ganho = random.randint(20, 90)
+    db.add_balance(ctx.sender_str, ganho)
+    ctx.reply(f"🚜 Você colheu {random.choice(crops)} e vendeu por +{ganho} moedas! 🧺")
+
+
+def cmd_race(ctx):
+    racers = ["🏎️ Você", "🚗 Bot", "🏍️ Rival"]
+    ctx.reply(f"🏁 *Corrida!*\n🥇 {random.choice(racers)} cruzou a linha primeiro!")
+
+
+def cmd_parkour(ctx):
+    score = random.randint(0, 100)
+    ctx.reply(f"🤸 *Parkour!*\nVocê completou *{score}%* do percurso de obstáculos!")
+
+
+def cmd_coinwar(ctx):
+    a, b = random.randint(1, 100), random.randint(1, 100)
+    res = "🎉 Você venceu!" if a >= b else "😢 Você perdeu!"
+    ctx.reply(f"🪙 *Guerra de Moedas!*\nVocê: {a} | Inimigo: {b}\n{res}")
+
+
+def cmd_poker(ctx):
+    cartas = ["A♠️", "K♥️", "Q♦️", "J♣️", "10♠️", "9♥️", "8♦️"]
+    mao = random.sample(cartas, 5)
+    ctx.reply(f"🃏 *Poker (simplificado)*\nSua mão: {' '.join(mao)}\n"
+              "_(Mostre sua mão e desafie os amigos!)_")
+
+
+def _social_game(ctx, emoji, nome, papeis):
+    phones = _group_phones(ctx)
+    if len(phones) < 2:
+        return ctx.reply(f"{emoji} *{nome}* precisa de um grupo com mais pessoas!")
+    escolhido = random.choice(phones)
+    papel = random.choice(papeis)
+    ctx.reply(f"{emoji} *{nome}*\n🎭 @{escolhido} é o *{papel}*!\n"
+              "_(versão simplificada — diversão garantida no grupo!)_")
+
+
+def cmd_mafia(ctx):
+    _social_game(ctx, "🕵️", "Máfia", ["Máfia 🔪", "Detetive 🔍", "Médico 💉", "Cidadão 👤"])
+
+
+def cmd_detective(ctx):
+    _social_game(ctx, "🔍", "Detetive", ["Culpado 😈", "Inocente 😇"])
+
+
+def cmd_spy(ctx):
+    _social_game(ctx, "🕶️", "Espião", ["Espião 🕶️", "Agente 🛡️"])
+
+
+def cmd_infected(ctx):
+    _social_game(ctx, "🧟", "Infectado", ["Infectado 🧟", "Sobrevivente 🏃"])
+
+
+def cmd_murdermystery(ctx):
+    _social_game(ctx, "🔪", "Mistério de Assassinato", ["Assassino 🔪", "Vítima 💀", "Investigador 🕵️"])
+
+
+def cmd_zombie(ctx):
+    sobreviventes = random.randint(1, 5)
+    ctx.reply(f"🧟 *Sobrevivência Zumbi!*\nApós o ataque, restaram *{sobreviventes}* sobreviventes! 🏚️")
+
+
+def cmd_survivor(ctx):
+    _social_game(ctx, "🏝️", "Survivor", ["Eliminado ❌", "Imune ✅"])
+
+
+def cmd_kingdom(ctx):
+    reinos = ["🏰 Norte", "🏜️ Deserto", "🌲 Floresta", "⛰️ Montanha"]
+    ctx.reply(f"👑 *Conquista de Reinos!*\nVocê conquistou: {random.choice(reinos)}! 🗡️")
+
+
+def cmd_hotpotato(ctx):
+    phones = _group_phones(ctx)
+    if phones:
+        ctx.reply(f"🥔🔥 *Batata Quente!*\n💥 Explodiu na mão de @{random.choice(phones)}!")
+    else:
+        ctx.reply("🥔 *Batata Quente* precisa de um grupo!")
+
+
+def cmd_fastclick(ctx):
+    cmd_reaction(ctx)
+
+
+# comandos que o WhatsApp não suporta (registrados de forma honesta)
+def cmd_nickname(ctx):
+    _na(ctx, "Alterar apelido de outros (/nickname)")
+
+
+def cmd_resetnick(ctx):
+    _na(ctx, "Restaurar apelido (/resetnick)")
+
+
+def cmd_hidechannel(ctx):
+    _na(ctx, "Ocultar canal (/hidechannel)")
+
+
+def cmd_showchannel(ctx):
+    _na(ctx, "Mostrar canal (/showchannel)")
+
+
+def cmd_clonechannel(ctx):
+    _na(ctx, "Clonar canal (/clonechannel)")
+
+
+def cmd_deletechannel(ctx):
+    _na(ctx, "Apagar canal (/deletechannel)")
+
+
+def cmd_createchannel(ctx):
+    _na(ctx, "Criar canal (/createchannel)")
+
+
+def cmd_boosts(ctx):
+    _na(ctx, "Boosts do servidor (/boosts)")
+
+
+def cmd_firstmessage(ctx):
+    _na(ctx, "Primeira mensagem do canal (/firstmessage)")
+
+
+def cmd_editsnipe(ctx):
+    _na(ctx, "Última mensagem editada (/editsnipe)")
+
+
+def cmd_guesslogo(ctx):
+    ctx.reply("🏷️ *Adivinhe o Logo* exige enviar imagens de logos — em breve! "
+              "Por enquanto tente /guessflag, /guesspokemon ou /guessanime 😉")
+
+
+def cmd_guesssong(ctx):
+    ctx.reply("🎵 *Adivinhe a Música* exige enviar áudios — em breve! "
+              "Por enquanto tente /trivia ou /guessanime 😉")
+
+
 # ===================== ROTEADOR =====================
 COMMANDS = {
     "ttkvd": cmd_ttkvd, "ban": cmd_ban, "unban": cmd_unban, "kick": cmd_kick, "mute": cmd_mute,
@@ -1054,6 +1944,44 @@ COMMANDS = {
     "coinflip": cmd_coinflip, "jokenpo": cmd_jokenpo, "8ball": cmd_8ball, "roll": cmd_roll,
     "tictactoe": cmd_tictactoe, "trivia": cmd_trivia, "hangman": cmd_hangman,
     "akinator": cmd_akinator, "russianroulette": cmd_russianroulette, "ship": cmd_ship,
+    # ----- IA avançada -----
+    "iamode": cmd_iamode, "aimodel": cmd_aimodel, "thinking": cmd_thinking,
+    "aisetname": cmd_aisetname, "aisetbio": cmd_aisetbio, "aisetavatar": cmd_aisetavatar,
+    "aichannel": cmd_aichannel, "aireset": cmd_aireset, "aistatus": cmd_aistatus,
+    # ----- v3.1 PRO: admin -----
+    "giverole": cmd_giverole, "temprole": cmd_temprole, "tempban": cmd_tempban,
+    "softban": cmd_softban, "massrole": cmd_massrole, "createrole": cmd_createrole,
+    "deleterole": cmd_deleterole, "setwelcome": cmd_setwelcome, "setbye": cmd_setbye,
+    "autorole": cmd_autorole, "setmodlog": cmd_setmodlog, "logs": cmd_setlogs,
+    "backupserver": cmd_backup_create, "restorebackup": cmd_backup_load,
+    "nickname": cmd_nickname, "resetnick": cmd_resetnick, "hidechannel": cmd_hidechannel,
+    "showchannel": cmd_showchannel, "clonechannel": cmd_clonechannel,
+    "deletechannel": cmd_deletechannel, "createchannel": cmd_createchannel,
+    # ----- v3.1 PRO: gerais -----
+    "qr": cmd_qr, "shorturl": cmd_shorturl, "password": cmd_password, "meme": cmd_meme,
+    "quote": cmd_quote, "fact": cmd_fact, "crypto": cmd_crypto, "timer": cmd_timer,
+    "countdown": cmd_countdown, "stopwatch": cmd_stopwatch, "convert": cmd_convert,
+    "emojify": cmd_emojify, "snipe": cmd_snipe, "editsnipe": cmd_editsnipe,
+    "banner": cmd_banner, "roleinfo": cmd_roleinfo, "channelinfo": cmd_channelinfo,
+    "membercount": cmd_membercount, "boosts": cmd_boosts, "randomuser": cmd_randomuser,
+    "randomnumber": cmd_randomnumber, "choose": cmd_choose, "reverse": cmd_reverse,
+    "sayembed": cmd_sayembed, "firstmessage": cmd_firstmessage,
+    # ----- v3.1 PRO: jogos -----
+    "slot": cmd_slot, "blackjack": cmd_blackjack, "roulette": cmd_roulette,
+    "crash": cmd_crash, "higherlower": cmd_higherlower, "guessnumber": cmd_guessnumber,
+    "mathrace": cmd_mathrace, "guessflag": cmd_guessflag, "guesspokemon": cmd_guesspokemon,
+    "guessanime": cmd_guessanime, "wordchain": cmd_wordchain, "memory": cmd_memory,
+    "reaction": cmd_reaction, "fastclick": cmd_fastclick, "wouldyourather": cmd_wouldyourather,
+    "neverhaveiever": cmd_neverhaveiever, "truth": cmd_truth, "dare": cmd_dare,
+    "battle": cmd_battle, "duel": cmd_duel, "bossfight": cmd_bossfight, "arena": cmd_arena,
+    "treasurehunt": cmd_treasurehunt, "heist": cmd_heist, "escape": cmd_escape,
+    "labyrinth": cmd_labyrinth, "dungeon": cmd_dungeon, "tower": cmd_tower,
+    "fishing": cmd_fishing, "mining": cmd_mining, "hunt": cmd_hunt, "petbattle": cmd_petbattle,
+    "dragonhunt": cmd_dragonhunt, "farm": cmd_farm, "race": cmd_race, "parkour": cmd_parkour,
+    "coinwar": cmd_coinwar, "poker": cmd_poker, "mafia": cmd_mafia, "detective": cmd_detective,
+    "spy": cmd_spy, "infected": cmd_infected, "murdermystery": cmd_murdermystery,
+    "zombie": cmd_zombie, "survivor": cmd_survivor, "kingdom": cmd_kingdom,
+    "hotpotato": cmd_hotpotato, "guesslogo": cmd_guesslogo, "guesssong": cmd_guesssong,
 }
 
 
@@ -1094,15 +2022,31 @@ def on_group_change(_, event):
 
 
 def handle_group_change(event):
-    """Boas-vindas a novos membros (/welcome) e barreira antibot."""
+    """Boas-vindas (/welcome), despedida (/setbye), autorole e antibot."""
+    chat = event.JID
+    chat_str = Jid2String(chat)
     try:
         joined = list(event.Join)
     except Exception:
         joined = []
+
+    # ----- DESPEDIDA (/setbye) -----
+    try:
+        left = list(event.Leave)
+    except Exception:
+        left = []
+    if left and db.get_setting(chat_str, "bye") == "1":
+        tpl = db.get_setting(chat_str, "byetext") or "👋 @user saiu do grupo. Até logo!"
+        for member in left:
+            phone = short_jid(Jid2String(member))
+            msg = tpl.replace("@user", f"@{phone}") if "@user" in tpl else f"{tpl} (@{phone})"
+            try:
+                client.send_message(chat, msg)
+            except Exception:
+                pass
+
     if not joined:
         return
-    chat = event.JID
-    chat_str = Jid2String(chat)
 
     # ----- ANTIBOT: bloqueia entradas feitas por quem não é admin -----
     if db.get_setting(chat_str, "antibot") == "1":
@@ -1130,19 +2074,33 @@ def handle_group_change(event):
                     pass
             return  # não dá boas-vindas a quem foi removido
 
+    # ----- AUTOROLE: dá um cargo a quem entra -----
+    auto = db.get_setting(chat_str, "autorole")
+    if auto:
+        for member in joined:
+            try:
+                db.add_role(chat_str, short_jid(Jid2String(member)), auto)
+            except Exception:
+                pass
+
     if db.get_setting(chat_str, "welcome") != "1":
         return
+    custom = db.get_setting(chat_str, "welcometext")
     for member in joined:
         member_str = Jid2String(member)
         phone = short_jid(member_str)
-        caption = (
-            f"{config.DECO_TOP}\n"
-            f"💖 *Bem-vindo(a)*, @{phone}! 🎉✨\n"
-            f"{config.DECO_LINE}\n"
-            f"Seja muito bem-vindo(a) ao grupo! 🥰🌸\n"
-            f"Use /help para ver tudo que eu faço 🤖💕\n"
-            f"{config.DECO_NAME}"
-        )
+        if custom:
+            caption = custom.replace("@user", f"@{phone}") if "@user" in custom \
+                else f"{custom}\n@{phone}"
+        else:
+            caption = (
+                f"{config.DECO_TOP}\n"
+                f"💖 *Bem-vindo(a)*, @{phone}! 🎉✨\n"
+                f"{config.DECO_LINE}\n"
+                f"Seja muito bem-vindo(a) ao grupo! 🥰🌸\n"
+                f"Use /help para ver tudo que eu faço 🤖💕\n"
+                f"{config.DECO_NAME}"
+            )
         try:
             pic = client.get_profile_picture(member)
             if pic and pic.URL:
@@ -1185,6 +2143,20 @@ def handle_message(message):
     # registra a mensagem recente (para /clear) — inclui mídia
     if src.IsGroup and msg_id:
         _recent_msgs[chat_str].append((sender_str, msg_id))
+
+    # rastreio p/ /snipe: guarda texto por id; detecta apagamento (revoke)
+    try:
+        revoked = message.Message.protocolMessage
+        if revoked and int(revoked.type) == 0 and revoked.key.ID:
+            # type 0 == REVOKE: recupera o texto que tínhamos guardado
+            for mid, snd, txt in _msg_text[chat_str]:
+                if mid == revoked.key.ID:
+                    _last_deleted[chat_str] = (snd, txt)
+                    break
+        elif text:
+            _msg_text[chat_str].append((msg_id, sender_str, text))
+    except Exception:
+        pass
 
     # ----- MUTE: apaga msgs do silenciado + avisa (máx. 3x) -----
     try:

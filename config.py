@@ -88,8 +88,29 @@ AI_MODELS = {
     "chatgpt": "openai/gpt-oss-120b:free",   # rápido e estável (padrão)
     "nex": "nex-agi/nex-n2-pro:free",         # existe, porém mais lento
     "glm": "z-ai/glm-4.5-air:free",           # devolve texto em "reasoning"
+    "gemini": "google/gemma-4-31b-it:free",   # modelo do Google (Gemma; Gemini free não existe)
 }
 DEFAULT_AI_MODEL = "chatgpt"
+
+# Personalidades da IA por grupo (/iamode). Cada modo injeta um trecho no
+# system prompt para mudar o tom das respostas.
+AI_MODES = {
+    "carinhosa": (
+        "Sua personalidade é CARINHOSA: responda de forma amigável e educada, "
+        "faça elogios quando apropriado e mantenha sempre um clima positivo. "
+        "Use MUITOS emojis fofos ✨🥰💖🌸."
+    ),
+    "zoeira": (
+        "Sua personalidade é ZOEIRA: faça piadas leves, brinque com os usuários "
+        "e seja divertida — mas NUNCA ofenda, humilhe ou use palavras pesadas. "
+        "Use emojis engraçados 😆🤣🔥😜."
+    ),
+    "sincera": (
+        "Sua personalidade é SINCERA: vá direto ao ponto, use POUCOS emojis e "
+        "enfeites, dê opiniões objetivas e foque na utilidade da resposta."
+    ),
+}
+DEFAULT_AI_MODE = "carinhosa"
 
 # Recompensas / economia
 DAILY_REWARD = 250

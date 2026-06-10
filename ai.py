@@ -20,14 +20,17 @@ class AIError(Exception):
     pass
 
 
-def _system_prompt() -> str:
-    return (
-        f"Você é {config.BOT_NAME}, uma assistente de IA fofa, simpática e animada "
-        f"que conversa em português dentro do WhatsApp. Responda de forma clara, "
-        f"calorosa e divertida. Você AMA usar MUITOS emojis em todas as respostas "
-        f"✨🥰💖😄🌸 — espalhe emojis pelo texto para deixar tudo mais alegre e bonito! "
-        f"Seja gentil e use uma linguagem leve e carinhosa."
+def _system_prompt(mode: str = None, name: str = None, bio: str = None) -> str:
+    name = name or config.BOT_NAME
+    base = (
+        f"Você é {name}, uma assistente de IA que conversa em português dentro "
+        f"do WhatsApp. Responda de forma clara e útil. "
     )
+    mode = (mode or config.DEFAULT_AI_MODE).lower()
+    base += config.AI_MODES.get(mode, config.AI_MODES[config.DEFAULT_AI_MODE])
+    if bio:
+        base += f" Informação extra sobre você: {bio}"
+    return base
 
 
 def _extract(data: dict) -> str:
@@ -96,10 +99,13 @@ def _call_model(model_id: str, messages: list, timeout: int) -> str:
     raise AIError(f"Falha após {MAX_RETRIES} tentativas ({last_err})")
 
 
-def chat(prompt: str, model_key: str = None, history: list = None) -> str:
+def chat(prompt: str, model_key: str = None, history: list = None,
+         mode: str = None, name: str = None, bio: str = None) -> str:
     """Conversa com a IA.
 
-    model_key: chave amigável em config.AI_MODELS (chatgpt/nex/glm).
+    model_key: chave amigável em config.AI_MODELS (chatgpt/nex/glm/gemini).
+    mode: personalidade (carinhosa/zoeira/sincera).
+    name/bio: nome e descrição personalizados da IA no grupo.
     history: lista opcional de mensagens [{role, content}, ...].
     """
     if not config.OPENROUTER_API_KEY:
@@ -108,7 +114,7 @@ def chat(prompt: str, model_key: str = None, history: list = None) -> str:
     model_key = (model_key or config.DEFAULT_AI_MODEL).lower()
     model_id = config.AI_MODELS.get(model_key, config.AI_MODELS[config.DEFAULT_AI_MODEL])
 
-    messages = [{"role": "system", "content": _system_prompt()}]
+    messages = [{"role": "system", "content": _system_prompt(mode, name, bio)}]
     if history:
         messages.extend(history)
     messages.append({"role": "user", "content": prompt})

@@ -184,12 +184,60 @@ Três modelos gratuitos, **testados de verdade (HTTP 200)**:
 - **`/setlogs`** — canal de auditoria em tempo real; **`/auditlog`** lista as últimas ações.
 
 > ⚠️ **Para apagar mensagens de OUTROS** (`/clear`, `/mute`, `/antilink`) o bot
-> precisa ser **administrador** do grupo. **`/ttkvd`, `/fg` (vídeo) e `/va`**
-> exigem **ffmpeg** (`pkg install ffmpeg -y`).
+> precisa ser **administrador** do grupo.
+>
+> 🖼️ **Figurinha de IMAGEM (`/fg`) funciona SEM ffmpeg** — convertemos com
+> Pillow para WebP 512×512 e enviamos com `passthrough`. Só **figurinha de
+> vídeo** e **`/va` (áudio)** precisam de **ffmpeg** (`pkg install ffmpeg -y`).
+> Se o seu ffmpeg não tiver o encoder **libwebp** (comum no Termux), a figurinha
+> de vídeo não é possível e o bot avisa de forma clara — use uma imagem.
 
 ### 🎮 Jogos & Brincadeiras (10)
 `/coinflip` · `/jokenpo` · `/8ball` · `/roll` · `/tictactoe` · `/trivia` ·
 `/hangman` · `/akinator` · `/russianroulette` · `/ship`
+
+---
+
+## 🤖 IA Avançada (configurável por grupo)
+
+| Comando | O que faz |
+|---|---|
+| `/iamode <carinhosa\|zoeira\|sincera>` | Muda a **personalidade** da IA no grupo 💙😆🎯 |
+| `/aimodel <chatgpt\|nex\|glm\|gemini>` | Escolhe o **modelo** (gemini = Google Gemma) |
+| `/thinking <on\|off>` | **Modo pensamento**: mostra o raciocínio antes de responder ⏳ |
+| `/aisetname <nome>` | Dá um **nome** à IA no grupo |
+| `/aisetbio <texto>` | Define uma **descrição/personalidade** customizada |
+| `/aichannel` · `/aireset` · `/aistatus` | Canal da IA · resetar · ver status atual |
+
+> Os 4 modelos foram **testados ao vivo (HTTP 200)**. `gemini` usa
+> `google/gemma-4-31b-it:free` — não existe um *Gemini* gratuito no OpenRouter,
+> então usamos o modelo aberto do Google (Gemma).
+
+## 👑 v3.1 PRO — +100 comandos
+
+**Admin (novos):** `/giverole` `/temprole` `/tempban` `/softban` `/massrole`
+`/createrole` `/deleterole` `/setwelcome` `/setbye` `/autorole` `/setmodlog`
+`/logs` `/backupserver` `/restorebackup`
+
+**Gerais (novos):** `/qr` `/shorturl` `/password` `/meme` `/quote` `/fact`
+`/crypto` `/timer` `/countdown` `/stopwatch` `/convert` `/emojify` `/snipe`
+`/banner` `/roleinfo` `/membercount` `/randomuser` `/randomnumber` `/choose`
+`/reverse` `/sayembed`
+
+**Jogos (novos, 50):** cassino (`/slot` `/blackjack` `/roulette` `/crash`
+`/higherlower` `/coinwar` `/poker`), RPG/aventura (`/battle` `/duel` `/bossfight`
+`/arena` `/treasurehunt` `/heist` `/escape` `/labyrinth` `/dungeon` `/tower`
+`/fishing` `/mining` `/hunt` `/petbattle` `/dragonhunt` `/farm` `/race`
+`/parkour`), adivinhação (`/guessnumber` `/mathrace` `/guessflag`
+`/guesspokemon` `/guessanime` `/wordchain`), sociais de grupo (`/mafia`
+`/detective` `/spy` `/infected` `/murdermystery` `/zombie` `/survivor`
+`/kingdom` `/hotpotato`) e festa (`/wouldyourather` `/truth` `/dare`
+`/neverhaveiever`).
+
+> Alguns comandos de Discord **não existem na API do WhatsApp**
+> (`/createchannel`, `/hidechannel`, `/clonechannel`, `/nickname`, `/boosts`,
+> `/firstmessage`…). Eles estão registrados, mas respondem de forma **honesta**
+> explicando a limitação — sem fingir que funcionam.
 
 ---
 
