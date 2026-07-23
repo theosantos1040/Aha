@@ -80,28 +80,36 @@ sobreviva a reinícios** (senão você repareia toda hora). No Render isso é um
 Funções serverless (Vercel/Netlify/Lambda) **não servem**: desligam sozinhas.
 
 O repositório já vem com `Dockerfile` (instala ffmpeg + libmagic) e
-`render.yaml` (define worker, disco e variáveis). Passo a passo:
+`render.yaml` (define o serviço web, disco e variáveis). Passo a passo:
 
 1. **Suba seu fork** para o GitHub (branch `claude/whatsapp-ai-bot-python-hk270m`).
 2. No Render: **New → Blueprint** e selecione este repositório.
-   Ele lê o `render.yaml` e cria o worker + o disco `/data` automaticamente.
+   Ele lê o `render.yaml` e cria o **web service** + o disco `/data`
+   automaticamente.
 3. Em **Environment**, preencha as variáveis marcadas como `sync: false`:
 
    | Variável | Valor |
    |---|---|
    | `OPENROUTER_API_KEY` | sua chave do OpenRouter |
-   | `PHONE_NUMBER` | seu número: DDI+DDD+número, só dígitos (ex: `5511999999999`) |
+   | `PHONE_NUMBER` | (opcional) seu número: DDI+DDD+número, só dígitos (ex: `5511999999999`) |
    | `BOT_NAME` | (opcional) nome da IA |
    | `OWNERS` | (opcional) donos globais |
 
-   As demais (`LOGIN_METHOD=code`, `SESSION_DB`, `DATA_DB`) já vêm prontas.
-4. **Deploy.** No primeiro start, o bot pede o **código de pareamento** e o
-   imprime nos **Logs** do Render (tipo `ABCD-1234`). No celular:
-   **WhatsApp > Aparelhos conectados > Conectar um aparelho >
-   Conectar com número de telefone** e digite o código (ele expira rápido —
-   tenha o WhatsApp aberto antes de olhar os logs).
+   As demais (`LOGIN_METHOD=web`, `SESSION_DB`, `DATA_DB`) já vêm prontas.
+4. **Deploy.** Quando o build terminar, abra a **URL pública** que o Render
+   gera (tipo `https://thzyxbots.onrender.com`) — ela mostra uma **página de
+   pareamento** com:
+   - o **QR Code** (atualiza sozinho), **ou**
+   - um campo para digitar seu número e gerar o **código de 6-8 dígitos**.
+
+   No celular: **WhatsApp > Aparelhos conectados > Conectar um aparelho**
+   (escaneia o QR) **ou > Conectar com número de telefone** (digita o
+   código). A página avisa "✅ Conectado!" assim que parear.
 5. Pronto. A sessão fica salva no disco `/data`; nos próximos reinícios e
-   deploys ele reconecta **sozinho**, sem pedir código de novo.
+   deploys ele reconecta **sozinho**, sem pedir QR/código de novo.
+
+> 💡 Se preferir o código impresso nos **Logs** em vez da página web, defina
+> `LOGIN_METHOD=code` (o Render loga em texto, sem interface visual).
 
 > 💡 O mesmo `Dockerfile` funciona em **Railway**, **Fly.io**, **DigitalOcean
 > App Platform** ou qualquer VPS com Docker — só garanta um **volume
@@ -278,6 +286,7 @@ rodam sem precisar de conta/QR.
 ```
 run.py          # ponto de entrada
 bot.py          # eventos + handlers de todos os comandos (neonize)
+webui.py        # página web de pareamento (QR + código) — LOGIN_METHOD=web
 ai.py           # cliente OpenRouter (retry + fallback de modelo/reasoning)
 database.py     # SQLite: economia, XP, warns, AFK, prefixo, banlist...
 games.py        # lógica pura dos jogos

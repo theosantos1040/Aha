@@ -26,4 +26,8 @@ ENV SESSION_DB=/data/session.sqlite3 \
     DATA_DB=/data/bot_data.sqlite3 \
     PYTHONUNBUFFERED=1
 
+# porta da página de pareamento (QR + código) quando LOGIN_METHOD=web
+# o Render define $PORT sozinho; localmente usa 8080 por padrão
+EXPOSE 8080
+
 CMD ["python", "run.py"]

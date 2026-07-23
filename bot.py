@@ -7,6 +7,7 @@ import json
 import os
 import random
 import re
+import sys
 import threading
 import time
 
@@ -23,6 +24,7 @@ import media
 import services
 import tiktok
 import utils
+import webui
 from ai import AIError, chat as ai_chat
 
 START_TIME = time.time()
@@ -2009,11 +2011,13 @@ def handle_command(message, text):
 @client.event(ConnectedEv)
 def on_connected(_, __):
     print(f"✅ {config.BOT_NAME} conectado ao WhatsApp!")
+    webui.set_connected()
 
 
 @client.event(PairStatusEv)
 def on_pair(_, message):
     print(f"🔗 Pareado como: {message.ID.User}")
+    webui.set_connected()
 
 
 @client.event(GroupInfoEv)
@@ -2311,27 +2315,87 @@ def connect_with_paircode(number: str):
     t.join()
 
 
+def _request_pair_code(number: str):
+    """Pede um código de pareamento e publica na página web (usado por /pair)."""
+    number = _normalize_number(number)
+    if not number:
+        webui.set_error("Número inválido. Use DDI+DDD+número, só dígitos.")
+        return
+    for _ in range(40):
+        try:
+            code = client.PairPhone(number, True)
+            if code:
+                pretty = f"{code[:4]}-{code[4:]}" if len(code) == 8 else code
+                webui.set_code(pretty)
+                return
+        except Exception:
+            time.sleep(1.5)
+    webui.set_error("Não consegui gerar o código. Verifique o número e tente de novo.")
+
+
+def connect_web(number: str = ""):
+    """Conecta expondo QR e código de pareamento numa página web (Render/VPS
+    sem terminal interativo). Não bloqueia esperando input — quem decide se
+    escaneia o QR ou digita o número é quem abrir a página no navegador."""
+    port = int(os.getenv("PORT", "8080"))
+    webui.start(config.BOT_NAME, port, _request_pair_code)
+    print(f"🌐 Página de pareamento em: http://0.0.0.0:{port}  (abra no navegador e escaneie o QR ou digite seu número)")
+
+    def _on_qr(_, qr_data):
+        try:
+            text = qr_data.decode() if isinstance(qr_data, (bytes, bytearray)) else str(qr_data)
+            webui.set_qr(services.qr_png(text))
+        except Exception as exc:
+            webui.set_error(f"Erro ao gerar QR: {exc}")
+
+    try:
+        client.event.qr(_on_qr)
+    except Exception:
+        pass
+
+    t = threading.Thread(target=client.connect, daemon=True)
+    t.start()
+
+    number = _normalize_number(number)
+    if number:
+        time.sleep(3)
+        try:
+            already = client.is_logged_in
+        except Exception:
+            already = False
+        if not already:
+            _request_pair_code(number)
+    t.join()
+
+
 def main():
     db.init()
     if not config.OPENROUTER_API_KEY:
         print("⚠️  OPENROUTER_API_KEY não definida — o comando /IA ficará indisponível.")
     threading.Thread(target=reminder_loop, daemon=True).start()
 
-    # método de login: código (padrão) ou QR
+    # método de login: código, QR (terminal) ou web (página com QR + código)
     method = os.getenv("LOGIN_METHOD", "").strip().lower()
     number = os.getenv("PHONE_NUMBER", "").strip()
+
+    # sem terminal interativo (Render, VPS headless etc.) → força o método web
+    if not method and not sys.stdin.isatty():
+        method = "web"
 
     if not method:
         print(f"\n🚀 {config.BOT_NAME} — como deseja conectar?")
         print("  [1] Código de pareamento (digitar o número)  ← recomendado")
         print("  [2] QR Code")
+        print("  [3] Página web (QR + código, útil em servidores)")
         try:
-            choice = input("Escolha [1/2]: ").strip()
+            choice = input("Escolha [1/2/3]: ").strip()
         except (EOFError, KeyboardInterrupt):
             choice = "1"
-        method = "qr" if choice == "2" else "code"
+        method = {"2": "qr", "3": "web"}.get(choice, "code")
 
-    if method.startswith("q"):
+    if method == "web":
+        connect_web(number)
+    elif method.startswith("q"):
         print("📷 Gerando QR Code... escaneie com o WhatsApp.")
         client.connect()
     else:
