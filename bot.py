@@ -14,6 +14,7 @@ import time
 import neonize.proto.Neonize_pb2 as N
 from neonize.client import NewClient
 from neonize.events import ConnectedEv, GroupInfoEv, MessageEv, PairStatusEv
+from neonize.exc import PairPhoneError
 from neonize.utils.enum import MediaType, MediaTypeToMMS, ParticipantChange, VoteType
 from neonize.utils.jid import build_jid, Jid2String
 
@@ -2302,35 +2303,66 @@ def connect_with_paircode(number: str):
 
     if not already:
         print(f"📲 Solicitando código de pareamento para +{number}...")
-        for _ in range(40):
-            try:
-                code = client.PairPhone(number, True)
-                if code:
-                    _print_pair_code(code)
-                    break
-            except Exception:
-                time.sleep(1.5)
+        if not _wait_connected(25):
+            print("❌ Não conectou ao WhatsApp a tempo. Verifique sua internet e tente de novo.")
         else:
-            print("❌ Não consegui solicitar o código. Verifique o número e a conexão.")
+            code, err = _try_pair_phone(number)
+            if code:
+                _print_pair_code(code)
+            else:
+                print(f"❌ Não consegui gerar o código: {err}")
     t.join()
+
+
+def _wait_connected(timeout: float = 20) -> bool:
+    """Espera o socket com o WhatsApp abrir antes de pedir o código —
+    pedir PairPhone antes disso é a causa mais comum de falha silenciosa."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            if client.is_connected:
+                return True
+        except Exception:
+            pass
+        time.sleep(0.5)
+    return False
+
+
+def _try_pair_phone(number: str, attempts: int = 5):
+    """Chama PairPhone algumas vezes, devolvendo (código, None) ou
+    (None, mensagem_de_erro_real) — nunca engole a exceção em silêncio."""
+    last_err = "erro desconhecido"
+    for i in range(attempts):
+        try:
+            code = client.PairPhone(number, True)
+            if code:
+                return code, None
+        except PairPhoneError as exc:
+            last_err = str(exc) or "o WhatsApp recusou o pedido (número incorreto ou já pareado?)"
+            print(f"⚠️ PairPhone recusou ({i + 1}/{attempts}): {last_err}")
+            break  # erro do servidor: repetir não muda o resultado
+        except Exception as exc:
+            last_err = str(exc)
+            print(f"⚠️ PairPhone falhou ({i + 1}/{attempts}): {last_err}")
+        time.sleep(1.5)
+    return None, last_err
 
 
 def _request_pair_code(number: str):
     """Pede um código de pareamento e publica na página web (usado por /pair)."""
     number = _normalize_number(number)
     if not number:
-        webui.set_error("Número inválido. Use DDI+DDD+número, só dígitos.")
+        webui.set_error("Número inválido. Use DDI+DDD+número, só dígitos (ex: 5511999999999).")
         return
-    for _ in range(40):
-        try:
-            code = client.PairPhone(number, True)
-            if code:
-                pretty = f"{code[:4]}-{code[4:]}" if len(code) == 8 else code
-                webui.set_code(pretty)
-                return
-        except Exception:
-            time.sleep(1.5)
-    webui.set_error("Não consegui gerar o código. Verifique o número e tente de novo.")
+    if not _wait_connected(20):
+        webui.set_error("Ainda conectando ao WhatsApp… aguarde alguns segundos e clique de novo.")
+        return
+    code, err = _try_pair_phone(number)
+    if code:
+        pretty = f"{code[:4]}-{code[4:]}" if len(code) == 8 else code
+        webui.set_code(pretty)
+    else:
+        webui.set_error(f"Não consegui gerar o código: {err}")
 
 
 def connect_web(number: str = ""):
