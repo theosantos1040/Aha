@@ -54,6 +54,13 @@ def set_error(msg: str):
         _state["requesting"] = False
 
 
+def revoke_code():
+    """Cancela/revoga o código atual e limpa o estado (volta pra tela de input)."""
+    with _lock:
+        _state["code"] = None
+        _state["error"] = None
+
+
 PAGE = """<!doctype html>
 <html lang="pt-br">
 <head>
@@ -76,6 +83,9 @@ PAGE = """<!doctype html>
   button {{ padding:10px 16px; border-radius:8px; border:none; background:#00a884;
             color:#fff; font-weight:600; cursor:pointer; margin-left:6px; }}
   button:hover {{ background:#02906f; }}
+  button.secondary {{ background:#3b4a54; }}
+  button.secondary:hover {{ background:#4a5a64; }}
+  .code-actions {{ margin-top:16px; }}
   .err {{ color:#f15c6d; margin-top:12px; font-size:.85rem; }}
   .steps {{ text-align:left; color:#8696a0; font-size:.8rem; margin-top:16px; line-height:1.5; }}
   .hidden {{ display:none; }}
@@ -94,6 +104,9 @@ PAGE = """<!doctype html>
       <p class="sub hidden" id="qrHint">WhatsApp &gt; Aparelhos conectados &gt; Conectar um aparelho</p>
       <div class="code hidden" id="codeBox"></div>
       <p class="sub hidden" id="codeHint">WhatsApp &gt; Aparelhos conectados &gt; Conectar com número de telefone</p>
+      <div class="code-actions hidden" id="codeActions">
+        <button type="button" id="revokeBtn" class="secondary">Revogar código</button>
+      </div>
       <form id="pairForm">
         <input id="numberInput" name="number" placeholder="Ex: 5511999999999"
                required pattern="[0-9]+" inputmode="numeric" autocomplete="off">
@@ -115,6 +128,12 @@ PAGE = """<!doctype html>
         await fetch('/pair', {{ method: 'POST', body: new URLSearchParams(new FormData(form)) }});
       }} catch (err) {{ /* próximo tick mostra o erro, se houver */ }}
       setTimeout(() => {{ btn.disabled = false; btn.textContent = 'Gerar código'; }}, 3000);
+    }});
+
+    document.getElementById('revokeBtn').addEventListener('click', async () => {{
+      try {{
+        await fetch('/revoke', {{ method: 'POST' }});
+      }} catch (err) {{ /* próximo tick mostra o estado, se houver */ }}
     }});
 
     let lastQr = null;
@@ -142,6 +161,7 @@ PAGE = """<!doctype html>
       if (s.code) codeBox.textContent = s.code;
       codeBox.classList.toggle('hidden', !s.code);
       document.getElementById('codeHint').classList.toggle('hidden', !s.code);
+      document.getElementById('codeActions').classList.toggle('hidden', !s.code);
       form.classList.toggle('hidden', !!s.code);
       document.getElementById('stepsText').classList.toggle('hidden', !!s.code);
 
@@ -190,6 +210,12 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(404, "text/plain", b"not found")
 
     def do_POST(self):
+        if self.path == "/revoke":
+            revoke_code()
+            self.send_response(303)
+            self.send_header("Location", "/")
+            self.end_headers()
+            return
         if self.path != "/pair":
             self._send(404, "text/plain", b"not found")
             return
