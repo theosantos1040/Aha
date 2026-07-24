@@ -78,37 +78,80 @@ PAGE = """<!doctype html>
   button:hover {{ background:#02906f; }}
   .err {{ color:#f15c6d; margin-top:12px; font-size:.85rem; }}
   .steps {{ text-align:left; color:#8696a0; font-size:.8rem; margin-top:16px; line-height:1.5; }}
+  .hidden {{ display:none; }}
 </style>
 </head>
 <body>
-  <div class="card" id="card">Carregando…</div>
+  <div class="card" id="card">
+    <div id="connectedView" class="hidden">
+      <h1>✅ Conectado!</h1>
+      <p class="sub">{bot_name} já está pareado com o WhatsApp.</p>
+    </div>
+    <div id="pairView">
+      <h1>🔗 Parear {bot_name}</h1>
+      <p class="sub">Escaneie o QR ou peça um código pelo número.</p>
+      <img id="qrImg" class="hidden" alt="QR Code">
+      <p class="sub hidden" id="qrHint">WhatsApp &gt; Aparelhos conectados &gt; Conectar um aparelho</p>
+      <div class="code hidden" id="codeBox"></div>
+      <p class="sub hidden" id="codeHint">WhatsApp &gt; Aparelhos conectados &gt; Conectar com número de telefone</p>
+      <form id="pairForm">
+        <input id="numberInput" name="number" placeholder="Ex: 5511999999999"
+               required pattern="[0-9]+" inputmode="numeric" autocomplete="off">
+        <button type="submit" id="pairBtn">Gerar código</button>
+      </form>
+      <p class="steps" id="stepsText">Digite DDI+DDD+número (só dígitos) para receber um
+        código, ou aguarde o QR Code acima.</p>
+      <p class="err hidden" id="errText"></p>
+    </div>
+  </div>
   <script>
+    const form = document.getElementById('pairForm');
+    form.addEventListener('submit', async (e) => {{
+      e.preventDefault();
+      const btn = document.getElementById('pairBtn');
+      btn.disabled = true;
+      btn.textContent = 'Enviando…';
+      try {{
+        await fetch('/pair', {{ method: 'POST', body: new URLSearchParams(new FormData(form)) }});
+      }} catch (err) {{ /* próximo tick mostra o erro, se houver */ }}
+      setTimeout(() => {{ btn.disabled = false; btn.textContent = 'Gerar código'; }}, 3000);
+    }});
+
+    let lastQr = null;
+    // Só troca o que realmente mudou — NUNCA recria o <input>, senão o
+    // teclado do celular fecha e o usuário perde o que estava digitando.
     async function tick() {{
       let s;
       try {{ s = await (await fetch('/status.json')).json(); }} catch (e) {{ return; }}
-      const card = document.getElementById('card');
+
       if (s.connected) {{
-        card.innerHTML = '<h1>✅ Conectado!</h1><p class="sub">{bot_name} já está pareado com o WhatsApp.</p>';
+        document.getElementById('connectedView').classList.remove('hidden');
+        document.getElementById('pairView').classList.add('hidden');
         return;
       }}
-      let body = '<h1>🔗 Parear {bot_name}</h1><p class="sub">Escaneie o QR ou peça um código pelo número.</p>';
-      if (s.qr) {{
-        body += '<img src="data:image/png;base64,' + s.qr + '" alt="QR Code">';
-        body += '<p class="sub">WhatsApp &gt; Aparelhos conectados &gt; Conectar um aparelho</p>';
+
+      const qrImg = document.getElementById('qrImg');
+      if (s.qr && s.qr !== lastQr) {{
+        qrImg.src = 'data:image/png;base64,' + s.qr;
+        lastQr = s.qr;
       }}
-      if (s.code) {{
-        body += '<div class="code">' + s.code + '</div>';
-        body += '<p class="sub">WhatsApp &gt; Aparelhos conectados &gt; Conectar com número de telefone</p>';
+      qrImg.classList.toggle('hidden', !s.qr);
+      document.getElementById('qrHint').classList.toggle('hidden', !s.qr);
+
+      const codeBox = document.getElementById('codeBox');
+      if (s.code) codeBox.textContent = s.code;
+      codeBox.classList.toggle('hidden', !s.code);
+      document.getElementById('codeHint').classList.toggle('hidden', !s.code);
+      form.classList.toggle('hidden', !!s.code);
+      document.getElementById('stepsText').classList.toggle('hidden', !!s.code);
+
+      const errText = document.getElementById('errText');
+      if (s.error) {{
+        errText.textContent = '⚠️ ' + s.error;
+        errText.classList.remove('hidden');
+      }} else {{
+        errText.classList.add('hidden');
       }}
-      if (!s.code) {{
-        body += '<form method="post" action="/pair">' +
-                '<input name="number" placeholder="Ex: 5511999999999" required pattern="[0-9]+">' +
-                '<button type="submit">Gerar código</button></form>' +
-                '<p class="steps">Digite DDI+DDD+número (só dígitos) para receber um código, ' +
-                'ou aguarde o QR Code acima.</p>';
-      }}
-      if (s.error) {{ body += '<p class="err">⚠️ ' + s.error + '</p>'; }}
-      card.innerHTML = body;
     }}
     tick();
     setInterval(tick, 2500);
