@@ -2012,6 +2012,7 @@ def handle_command(message, text):
 @client.event(ConnectedEv)
 def on_connected(_, __):
     print(f"✅ {config.BOT_NAME} conectado ao WhatsApp!")
+    _wa_ready.set()
     webui.set_connected()
 
 
@@ -2286,9 +2287,13 @@ def _print_pair_code(code: str):
 def connect_with_paircode(number: str):
     """Conecta usando código de pareamento (em vez de QR)."""
     number = _normalize_number(number)
-    # esconde a saída do QR para não confundir o usuário
+    _wa_ready.clear()
+    # Registra handler de QR que: (1) sinaliza que o handshake concluiu e
+    # (2) suprime a exibição do QR no terminal (não faz sentido no modo código)
+    def _silent_qr(_, __):
+        _wa_ready.set()
     try:
-        client.event.qr(lambda *a, **k: None)
+        client.event.qr(_silent_qr)
     except Exception:
         pass
     t = threading.Thread(target=client.connect, daemon=True)
@@ -2303,8 +2308,8 @@ def connect_with_paircode(number: str):
 
     if not already:
         print(f"📲 Solicitando código de pareamento para +{number}...")
-        if not _wait_connected(25):
-            print("❌ Não conectou ao WhatsApp a tempo. Verifique sua internet e tente de novo.")
+        if not _wait_wa_ready(35):
+            print("❌ WhatsApp não respondeu a tempo. Verifique sua internet e tente de novo.")
         else:
             code, err = _try_pair_phone(number)
             if code:
@@ -2314,23 +2319,30 @@ def connect_with_paircode(number: str):
     t.join()
 
 
-def _wait_connected(timeout: float = 20) -> bool:
-    """Espera o socket com o WhatsApp abrir antes de pedir o código —
-    pedir PairPhone antes disso é a causa mais comum de falha silenciosa."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            if client.is_connected:
-                return True
-        except Exception:
-            pass
-        time.sleep(0.5)
-    return False
+# Sinalizado quando o WhatsApp termina o handshake e está pronto para parear.
+# O evento QR dispara nesse momento (é o sinal correto, não is_connected).
+_wa_ready = threading.Event()
+
+
+def _wait_wa_ready(timeout: float = 40) -> bool:
+    """Aguarda o WhatsApp estar realmente pronto para aceitar PairPhone.
+
+    Usar client.is_connected é insuficiente: ele vira True quando o WebSocket
+    abre, mas o servidor ainda precisa concluir um handshake interno ("info
+    query"). O evento QR é o sinal correto — ele dispara só após esse
+    handshake, indicando que o servidor está esperando autenticação.
+    """
+    return _wa_ready.wait(timeout=timeout)
 
 
 def _try_pair_phone(number: str, attempts: int = 5):
     """Chama PairPhone algumas vezes, devolvendo (código, None) ou
-    (None, mensagem_de_erro_real) — nunca engole a exceção em silêncio."""
+    (None, mensagem_de_erro_real).
+
+    PairPhoneError = recusa definitiva do servidor (não repete).
+    Outros erros (websocket disconnected, timeout etc.) = tenta de novo após
+    aguardar o handshake completar, pois são erros transitórios de timing.
+    """
     last_err = "erro desconhecido"
     for i in range(attempts):
         try:
@@ -2340,11 +2352,13 @@ def _try_pair_phone(number: str, attempts: int = 5):
         except PairPhoneError as exc:
             last_err = str(exc) or "o WhatsApp recusou o pedido (número incorreto ou já pareado?)"
             print(f"⚠️ PairPhone recusou ({i + 1}/{attempts}): {last_err}")
-            break  # erro do servidor: repetir não muda o resultado
+            break  # recusa definitiva do servidor: não adianta repetir
         except Exception as exc:
             last_err = str(exc)
             print(f"⚠️ PairPhone falhou ({i + 1}/{attempts}): {last_err}")
-        time.sleep(1.5)
+            # "websocket disconnected" ou similar: aguarda handshake e tenta de novo
+            _wa_ready.wait(timeout=5)
+        time.sleep(2)
     return None, last_err
 
 
@@ -2354,8 +2368,8 @@ def _request_pair_code(number: str):
     if not number:
         webui.set_error("Número inválido. Use DDI+DDD+número, só dígitos (ex: 5511999999999).")
         return
-    if not _wait_connected(20):
-        webui.set_error("Ainda conectando ao WhatsApp… aguarde alguns segundos e clique de novo.")
+    if not _wait_wa_ready(35):
+        webui.set_error("WhatsApp ainda não respondeu. Aguarde o QR aparecer e tente de novo.")
         return
     code, err = _try_pair_phone(number)
     if code:
@@ -2369,11 +2383,14 @@ def connect_web(number: str = ""):
     """Conecta expondo QR e código de pareamento numa página web (Render/VPS
     sem terminal interativo). Não bloqueia esperando input — quem decide se
     escaneia o QR ou digita o número é quem abrir a página no navegador."""
+    _wa_ready.clear()
     port = int(os.getenv("PORT", "8080"))
     webui.start(config.BOT_NAME, port, _request_pair_code)
     print(f"🌐 Página de pareamento em: http://0.0.0.0:{port}  (abra no navegador e escaneie o QR ou digite seu número)")
 
     def _on_qr(_, qr_data):
+        # QR disparado = handshake concluído = PairPhone pode ser chamado agora
+        _wa_ready.set()
         try:
             text = qr_data.decode() if isinstance(qr_data, (bytes, bytearray)) else str(qr_data)
             webui.set_qr(services.qr_png(text))
