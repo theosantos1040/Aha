@@ -2388,12 +2388,24 @@ def connect_web(number: str = ""):
     webui.start(config.BOT_NAME, port, _request_pair_code)
     print(f"🌐 Página de pareamento em: http://0.0.0.0:{port}  (abra no navegador e escaneie o QR ou digite seu número)")
 
+    _conn_lock = threading.Lock()
+    _conn_thread = [None]
+
+    def _start_connection():
+        with _conn_lock:
+            if _conn_thread[0] and _conn_thread[0].is_alive():
+                return
+            t = threading.Thread(target=client.connect, daemon=True)
+            _conn_thread[0] = t
+            t.start()
+
     def _on_qr(_, qr_data):
         # QR disparado = handshake concluído = PairPhone pode ser chamado agora
         _wa_ready.set()
         try:
             text = qr_data.decode() if isinstance(qr_data, (bytes, bytearray)) else str(qr_data)
             webui.set_qr(services.qr_png(text))
+            print("📷 Novo QR Code gerado.")
         except Exception as exc:
             webui.set_error(f"Erro ao gerar QR: {exc}")
 
@@ -2402,8 +2414,31 @@ def connect_web(number: str = ""):
     except Exception:
         pass
 
-    t = threading.Thread(target=client.connect, daemon=True)
-    t.start()
+    def _force_new_qr():
+        """Reconecta para forçar o WhatsApp a gerar um novo QR Code."""
+        print(f"🔄 Renovando QR Code (expira a cada {webui.QR_TTL}s)…")
+        _wa_ready.clear()
+        try:
+            client.Disconnect()
+        except Exception:
+            pass
+        time.sleep(2)
+        _start_connection()
+
+    webui.set_refresh_callback(_force_new_qr)
+
+    def _qr_watchdog():
+        """Renova o QR automaticamente a cada QR_TTL segundos enquanto não parear."""
+        while True:
+            time.sleep(webui.QR_TTL)
+            if webui._state.get("connected"):
+                return
+            if webui._state.get("code"):
+                continue
+            _force_new_qr()
+
+    threading.Thread(target=_qr_watchdog, daemon=True).start()
+    _start_connection()
 
     number = _normalize_number(number)
     if number:
@@ -2414,7 +2449,11 @@ def connect_web(number: str = ""):
             already = False
         if not already:
             _request_pair_code(number)
-    t.join()
+
+    t = _conn_thread[0]
+    if t:
+        t.join()
+
 
 
 def main():
