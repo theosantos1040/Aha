@@ -2128,7 +2128,11 @@ def handle_command(message, text):
     handler = COMMANDS.get(command)
     if not handler:
         return
-    ctx = Ctx(message, command, args)
+    try:
+        ctx = Ctx(message, command, args)
+    except Exception as exc:
+        print(f"❌ Erro ao criar contexto para /{command}: {exc}")
+        return
     try:
         handler(ctx)
     except Exception as exc:  # nunca derrubar o listener
@@ -2362,7 +2366,12 @@ def _is_exempt(chat, chat_str, sender_str):
 
 @client.event(MessageEv)
 def on_message(_, message):
-    handle_message(message)
+    try:
+        handle_message(message)
+    except Exception as exc:
+        import traceback
+        print(f"❌ Erro não capturado em handle_message: {exc}")
+        traceback.print_exc()
 
 
 def handle_message(message):
@@ -2376,6 +2385,8 @@ def handle_message(message):
     phone = short_jid(sender_str)
     msg_id = message.Info.ID
     text = get_text(message)
+    if text:
+        print(f"📩 [{phone}] {text[:80]}")
 
     # registra a mensagem recente (para /clear) — inclui mídia
     if src.IsGroup and msg_id:
@@ -2581,16 +2592,23 @@ def connect_with_paircode(number: str):
         pass
 
     MAX_TENTATIVAS = 20
-    for tentativa in range(MAX_TENTATIVAS):
+    tentativa = 0
+    while True:
         _wa_ready.clear()
         _run_connect()
-        if _paired.is_set():
-            return
-        espera = min(3 + tentativa * 2, 20)
-        print(f"🔄 Canal de QR expirou (socket caiu). Reconectando em {espera}s… "
-              f"[{tentativa + 1}/{MAX_TENTATIVAS}]")
+        if not _paired.is_set():
+            tentativa += 1
+            if tentativa >= MAX_TENTATIVAS:
+                print("⛔ Limite de reconexões atingido sem parear. Reinicie e tente de novo.")
+                return
+            espera = min(3 + tentativa * 2, 20)
+            print(f"🔄 Canal de QR expirou (socket caiu). Reconectando em {espera}s… "
+                  f"[{tentativa}/{MAX_TENTATIVAS}]")
+        else:
+            espera = min(5 + tentativa * 2, 30)
+            print(f"🔄 Conexão caiu (já pareado). Reconectando em {espera}s…")
+            tentativa += 1
         time.sleep(espera)
-    print("⛔ Limite de reconexões atingido sem parear. Reinicie e tente de novo.")
 
 
 # Sinalizado quando o WhatsApp termina o handshake e está pronto para parear.
@@ -2767,27 +2785,40 @@ def connect_web(number: str = ""):
         )
 
     def _connect_loop():
-        """Mantém uma conexão de pareamento viva até parear.
+        """Mantém a conexão WhatsApp viva indefinidamente.
 
-        Se já existe sessão salva, o primeiro _run_connect() bloqueia servindo
-        mensagens e o loop nunca repete. Sem sessão, connect() volta a cada
-        expiração do canal de QR e reconectamos, com backoff, até o limite.
+        Fase 1 (antes de parear): reconecta até MAX_TENTATIVAS vezes ao expirar
+        o canal de QR — cada nova conexão deixa o QR disponível de novo.
+
+        Fase 2 (depois de parear / sessão existente): se o socket cair,
+        reconecta automaticamente com backoff para retomar o recebimento de
+        mensagens, sem precisar reparear.
         """
-        MAX_TENTATIVAS = 20  # ~15 min; evita martelar o WhatsApp (risco de ban)
-        for tentativa in range(MAX_TENTATIVAS):
+        MAX_TENTATIVAS = 20  # ~15 min sem parear; evita martelar o WhatsApp
+        tentativa = 0
+        while True:
             _wa_ready.clear()
             _run_connect(_on_connect_error)
-            if _paired.is_set():
-                return
-            espera = min(3 + tentativa * 2, 20)
-            print(f"🔄 Canal de QR expirou (socket caiu). Reconectando em {espera}s… "
-                  f"[{tentativa + 1}/{MAX_TENTATIVAS}]")
+
+            if not _paired.is_set():
+                # ainda não pareou — conta como tentativa de QR
+                tentativa += 1
+                if tentativa >= MAX_TENTATIVAS:
+                    print("⛔ Limite de reconexões atingido sem parear.")
+                    webui.set_error(
+                        "Não consegui parear depois de várias tentativas. Reinicie o serviço "
+                        "para tentar de novo."
+                    )
+                    return
+                espera = min(3 + tentativa * 2, 20)
+                print(f"🔄 Canal de QR expirou (socket caiu). Reconectando em {espera}s… "
+                      f"[{tentativa}/{MAX_TENTATIVAS}]")
+            else:
+                # já estava pareado — reconecta automaticamente
+                espera = min(5 + tentativa * 2, 30)
+                print(f"🔄 Conexão caiu (já pareado). Reconectando em {espera}s…")
+                tentativa += 1
             time.sleep(espera)
-        print("⛔ Limite de reconexões atingido sem parear.")
-        webui.set_error(
-            "Não consegui parear depois de várias tentativas. Reinicie o serviço "
-            "para tentar de novo."
-        )
 
     t = threading.Thread(target=_connect_loop, daemon=True)
     t.start()
@@ -2860,7 +2891,11 @@ def main():
         connect_web(number)
     elif method.startswith("q"):
         print("📷 Gerando QR Code... escaneie com o WhatsApp.")
-        client.connect()
+        while True:
+            _run_connect()
+            espera = 5
+            print(f"🔄 Conexão caiu. Reconectando em {espera}s…")
+            time.sleep(espera)
     else:
         if not number:
             try:
