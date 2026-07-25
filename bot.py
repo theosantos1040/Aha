@@ -2382,34 +2382,29 @@ def _request_pair_code(number: str):
 def connect_web(number: str = ""):
     """Conecta expondo QR e código de pareamento numa página web (Render/VPS
     sem terminal interativo). Não bloqueia esperando input — quem decide se
-    escaneia o QR ou digita o número é quem abrir a página no navegador."""
+    escaneia o QR ou digita o número é quem abrir a página no navegador.
+
+    IMPORTANTE: client.connect() do neonize é uma chamada ÚNICA e bloqueante
+    (só retorna quando client.stop() é chamado ou a conexão cai de vez).
+    O whatsmeow por baixo JÁ renova o QR Code sozinho, automaticamente,
+    disparando o callback de QR várias vezes dentro dessa MESMA chamada
+    (a cada ~20s, por alguns minutos) — não é preciso (e é arriscado)
+    parar e reconectar manualmente para "forçar" um novo QR.
+    """
     _wa_ready.clear()
     port = int(os.getenv("PORT", "8080"))
     webui.start(config.BOT_NAME, port, _request_pair_code)
     print(f"🌐 Página de pareamento em: http://0.0.0.0:{port}  (abra no navegador e escaneie o QR ou digite seu número)")
 
-    _conn_lock = threading.Lock()
-    _conn_thread = [None]
-
-    def _start_connection():
-        with _conn_lock:
-            prev = _conn_thread[0]
-            # Só bloqueia nova conexão se a thread anterior ainda está viva
-            # (stop()/disconnect() encerra a thread, então is_alive() fica False)
-            if prev and prev.is_alive():
-                return
-            _wa_ready.clear()
-            t = threading.Thread(target=client.connect, daemon=True)
-            _conn_thread[0] = t
-            t.start()
-
     def _on_qr(_, qr_data):
-        # QR disparado = handshake concluído = PairPhone pode ser chamado agora
+        # Disparado automaticamente pelo whatsmeow a cada renovação do QR
+        # (várias vezes durante a mesma conexão) — handshake concluído,
+        # PairPhone já pode ser chamado a partir daqui.
         _wa_ready.set()
         try:
             text = qr_data.decode() if isinstance(qr_data, (bytes, bytearray)) else str(qr_data)
             webui.set_qr(services.qr_png(text))
-            print("📷 Novo QR Code gerado.")
+            print("📷 QR Code atualizado.")
         except Exception as exc:
             webui.set_error(f"Erro ao gerar QR: {exc}")
 
@@ -2418,40 +2413,8 @@ def connect_web(number: str = ""):
     except Exception:
         pass
 
-    def _force_new_qr():
-        """Para o client completamente e reconecta para forçar novo QR Code."""
-        if webui._state.get("connected"):
-            return
-        print(f"🔄 Renovando QR Code (expira a cada {webui.QR_TTL}s)…")
-        _wa_ready.clear()
-        webui.set_refreshing()
-        # Para a conexão atual completamente antes de abrir nova
-        try:
-            client.stop()
-        except Exception:
-            try:
-                client.disconnect()
-            except Exception:
-                pass
-        time.sleep(5)  # aguarda o Go side finalizar antes de reconectar
-        if not webui._state.get("connected"):
-            _start_connection()
-
-    webui.set_refresh_callback(_force_new_qr)
-
-    def _qr_watchdog():
-        """Renova o QR automaticamente enquanto não parear."""
-        while True:
-            time.sleep(webui.QR_TTL)
-            if webui._state.get("connected"):
-                return
-            # Não renova enquanto o usuário está usando um código
-            if webui._state.get("code"):
-                continue
-            _force_new_qr()
-
-    threading.Thread(target=_qr_watchdog, daemon=True).start()
-    _start_connection()
+    t = threading.Thread(target=client.connect, daemon=True)
+    t.start()
 
     number = _normalize_number(number)
     if number:
@@ -2463,9 +2426,7 @@ def connect_web(number: str = ""):
         if not already:
             _request_pair_code(number)
 
-    t = _conn_thread[0]
-    if t:
-        t.join()
+    t.join()
 
 
 

@@ -2,8 +2,12 @@
 
 Usado quando o bot roda num host sem terminal interativo (Render, VPS
 headless etc.): em vez de imprimir o QR/código no console, expõe uma
-página HTML simples que mostra o QR (renovado a cada 45 s) e um
-formulário para gerar o código de pareamento a partir do número.
+página HTML simples que mostra o QR e um formulário para gerar o código
+de pareamento a partir do número.
+
+O próprio whatsmeow (por baixo do neonize) já renova o QR Code sozinho
+várias vezes dentro da MESMA conexão — este módulo só precisa exibir
+cada QR novo assim que `set_qr()` é chamado de novo pelo bot.
 
 Não usa Flask nem nenhuma dependência extra — só `http.server` da stdlib.
 """
@@ -15,7 +19,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
 
-QR_TTL = 45  # segundos até o QR expirar / ser renovado
+QR_TTL = 20  # estimativa em segundos p/ barra visual (whatsmeow costuma renovar por volta disso)
 
 _lock = threading.Lock()
 _state = {
@@ -25,11 +29,9 @@ _state = {
     "connected": False,  # já pareado com o WhatsApp?
     "error": None,
     "requesting": False,
-    "refreshing": False, # True enquanto aguarda novo QR
 }
 _bot_name = ["ThzyxBoTS"]
 _pair_callback = None    # func(numero: str) chamada quando o form é enviado
-_refresh_callback = None # func() chamada para forçar renovação do QR
 
 
 def set_qr(png_bytes: bytes):
@@ -38,7 +40,6 @@ def set_qr(png_bytes: bytes):
         _state["qr_time"] = time.time()
         _state["code"] = None
         _state["error"] = None
-        _state["refreshing"] = False
 
 
 def set_code(code: str):
@@ -56,14 +57,12 @@ def set_connected():
         _state["qr_png"] = None
         _state["qr_time"] = None
         _state["code"] = None
-        _state["refreshing"] = False
 
 
 def set_error(msg: str):
     with _lock:
         _state["error"] = msg
         _state["requesting"] = False
-        _state["refreshing"] = False
 
 
 def revoke_code():
@@ -71,21 +70,6 @@ def revoke_code():
     with _lock:
         _state["code"] = None
         _state["error"] = None
-
-
-def set_refreshing():
-    """Marca que estamos aguardando um novo QR (exibe spinner na página)."""
-    with _lock:
-        _state["refreshing"] = True
-        _state["qr_png"] = None
-        _state["qr_time"] = None
-        _state["error"] = None
-
-
-def set_refresh_callback(fn):
-    """Registra a função que o servidor chama para forçar renovação do QR."""
-    global _refresh_callback
-    _refresh_callback = fn
 
 
 PAGE = """<!doctype html>
@@ -145,16 +129,16 @@ PAGE = """<!doctype html>
         <div class="countdown-bar-wrap">
           <div class="countdown-bar" id="countdownBar" style="width:100%"></div>
         </div>
-        <p class="countdown-label" id="countdownLabel">renova em 45s</p>
+        <p class="countdown-label" id="countdownLabel">renova sozinho em breve</p>
         <p class="sub" style="margin-top:0">
           WhatsApp &gt; Aparelhos conectados &gt; Conectar um aparelho
         </p>
       </div>
 
-      <!-- Spinner durante renovação do QR -->
-      <div id="refreshingView" class="hidden">
+      <!-- Spinner enquanto aguarda o primeiro QR chegar -->
+      <div id="refreshingView">
         <div class="spinner"></div>
-        <p class="sub">Aguardando novo QR Code…</p>
+        <p class="sub">Conectando ao WhatsApp…</p>
       </div>
 
       <!-- Código de pareamento -->
@@ -238,8 +222,9 @@ PAGE = """<!doctype html>
       }}
       qrSection.classList.toggle('hidden', !s.qr);
 
-      // Spinner de renovação
-      document.getElementById('refreshingView').classList.toggle('hidden', !s.refreshing || !!s.qr);
+      // Spinner: só aparece antes do primeiro QR/código/erro chegar
+      const waitingFirst = !s.qr && !s.code && !s.error;
+      document.getElementById('refreshingView').classList.toggle('hidden', !waitingFirst);
 
       // Código
       const codeBox = document.getElementById('codeBox');
@@ -295,7 +280,6 @@ class _Handler(BaseHTTPRequestHandler):
                     "qr_age": qr_age,
                     "code": _state["code"],
                     "error": _state["error"],
-                    "refreshing": _state["refreshing"],
                 }
             self._send(200, "application/json", json.dumps(payload).encode("utf-8"))
         elif self.path == "/health":
@@ -306,14 +290,6 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == "/revoke":
             revoke_code()
-            self.send_response(303)
-            self.send_header("Location", "/")
-            self.end_headers()
-            return
-        if self.path == "/refresh-qr":
-            if _refresh_callback and not _state["connected"]:
-                set_refreshing()
-                threading.Thread(target=_refresh_callback, daemon=True).start()
             self.send_response(303)
             self.send_header("Location", "/")
             self.end_headers()
