@@ -2335,29 +2335,56 @@ def _wait_wa_ready(timeout: float = 40) -> bool:
     return _wa_ready.wait(timeout=timeout)
 
 
-def _try_pair_phone(number: str, attempts: int = 5):
+# Trechos de mensagem que indicam problema TRANSITÓRIO de socket (o whatsmeow usa
+# literalmente "websocket not connected" / "websocket disconnected" internamente) —
+# nesses casos vale a pena esperar a reconexão e tentar de novo. Qualquer outra
+# PairPhoneError (número inválido, já pareado, rate limit etc.) é definitiva.
+_TRANSIENT_MARKERS = ("not connected", "disconnected", "conectad", "timeout", "context deadline")
+
+
+def _is_transient(msg: str) -> bool:
+    m = (msg or "").lower()
+    return any(marker in m for marker in _TRANSIENT_MARKERS)
+
+
+def _try_pair_phone(number: str, attempts: int = 6):
     """Chama PairPhone algumas vezes, devolvendo (código, None) ou
     (None, mensagem_de_erro_real).
 
-    PairPhoneError = recusa definitiva do servidor (não repete).
-    Outros erros (websocket disconnected, timeout etc.) = tenta de novo após
-    aguardar o handshake completar, pois são erros transitórios de timing.
+    Erros transitórios de socket ("websocket not connected"/"disconnected") são
+    comuns logo após o QR aparecer — o handshake HTTP termina antes do socket de
+    escrita ficar 100% pronto — então tentamos de novo aguardando is_connected
+    ficar True. Qualquer outra PairPhoneError é uma recusa definitiva do servidor
+    (número inválido, já pareado etc.) e não adianta repetir.
     """
     last_err = "erro desconhecido"
     for i in range(attempts):
+        # Espera o socket estar realmente aberto antes de cada tentativa —
+        # client.is_connected reflete o estado ATUAL (diferente de _wa_ready,
+        # que só sinaliza que o handshake ocorreu uma vez).
+        deadline = time.time() + 8
+        while time.time() < deadline:
+            try:
+                if client.is_connected:
+                    break
+            except Exception:
+                pass
+            time.sleep(0.3)
+
         try:
             code = client.PairPhone(number, True)
             if code:
                 return code, None
         except PairPhoneError as exc:
-            last_err = str(exc) or "o WhatsApp recusou o pedido (número incorreto ou já pareado?)"
-            print(f"⚠️ PairPhone recusou ({i + 1}/{attempts}): {last_err}")
-            break  # recusa definitiva do servidor: não adianta repetir
+            msg = str(exc) or "o WhatsApp recusou o pedido"
+            last_err = msg
+            if not _is_transient(msg):
+                print(f"⚠️ PairPhone recusou definitivamente ({i + 1}/{attempts}): {msg}")
+                break  # recusa definitiva do servidor: não adianta repetir
+            print(f"⚠️ PairPhone com erro transitório ({i + 1}/{attempts}): {msg} — tentando de novo…")
         except Exception as exc:
             last_err = str(exc)
             print(f"⚠️ PairPhone falhou ({i + 1}/{attempts}): {last_err}")
-            # "websocket disconnected" ou similar: aguarda handshake e tenta de novo
-            _wa_ready.wait(timeout=5)
         time.sleep(2)
     return None, last_err
 
