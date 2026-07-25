@@ -2284,6 +2284,24 @@ def _print_pair_code(code: str):
     print("═" * 44 + "\n")
 
 
+def _run_connect(on_error=None):
+    """Roda client.connect() capturando qualquer exceção — sem isso, uma
+    falha (sessão corrompida, erro de rede etc.) morre em silêncio dentro da
+    thread daemon e a página/terminal fica esperando pra sempre sem dizer
+    por quê."""
+    try:
+        client.connect()
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        print(f"❌ client.connect() falhou: {exc}")
+        if on_error:
+            try:
+                on_error(str(exc))
+            except Exception:
+                pass
+
+
 def connect_with_paircode(number: str):
     """Conecta usando código de pareamento (em vez de QR)."""
     number = _normalize_number(number)
@@ -2296,7 +2314,7 @@ def connect_with_paircode(number: str):
         client.event.qr(_silent_qr)
     except Exception:
         pass
-    t = threading.Thread(target=client.connect, daemon=True)
+    t = threading.Thread(target=_run_connect, daemon=True)
     t.start()
 
     # se já existe sessão salva, conecta direto (sem pedir código)
@@ -2440,8 +2458,37 @@ def connect_web(number: str = ""):
     except Exception:
         pass
 
-    t = threading.Thread(target=client.connect, daemon=True)
+    def _on_connect_error(msg):
+        webui.set_error(
+            f"Falha ao conectar ao WhatsApp: {msg}. Se isso persistir, apague o "
+            f"arquivo de sessão salvo (SESSION_DB) e tente parear de novo do zero."
+        )
+
+    t = threading.Thread(target=_run_connect, args=(_on_connect_error,), daemon=True)
     t.start()
+
+    def _startup_watchdog():
+        # Se depois de um tempo razoável nada apareceu (nem QR, nem erro, nem
+        # conectado), avisa na página em vez de deixar o spinner girando pra
+        # sempre sem explicação — ajuda a diagnosticar sessão corrompida,
+        # rede bloqueada etc.
+        time.sleep(30)
+        with webui._lock:
+            stuck = (
+                not webui._state["qr_png"]
+                and not webui._state["code"]
+                and not webui._state["error"]
+                and not webui._state["connected"]
+            )
+        if stuck:
+            print("⚠️ 30s sem QR/código/erro — conexão pode estar travada.")
+            webui.set_error(
+                "Demorando demais pra conectar ao WhatsApp (30s+ sem resposta). "
+                "Verifique os logs do servidor. Se persistir, pode ser sessão "
+                "corrompida — apague o arquivo SESSION_DB salvo e reinicie."
+            )
+
+    threading.Thread(target=_startup_watchdog, daemon=True).start()
 
     number = _normalize_number(number)
     if number:
