@@ -37,7 +37,13 @@ import services
 import tiktok
 import utils
 import webui
-from ai import AIError, chat as ai_chat
+from ai import (
+    AIError,
+    chat as ai_chat,
+    generate_image as ai_generate_image,
+    search as ai_search,
+    vision as ai_vision,
+)
 
 START_TIME = time.time()
 client = NewClient(config.SESSION_DB)
@@ -78,10 +84,20 @@ def get_text(message) -> str:
 
 
 def get_mentions(message):
-    try:
-        return list(message.Message.extendedTextMessage.contextInfo.mentionedJID)
-    except Exception:
-        return []
+    """Menções da mensagem — inclusive quando ela é uma FOTO/VÍDEO com legenda.
+
+    Nesse caso o mentionedJID fica no contextInfo do imageMessage/videoMessage,
+    não do extendedTextMessage.
+    """
+    m = message.Message
+    for sub in (m.extendedTextMessage, m.imageMessage, m.videoMessage):
+        try:
+            jids = list(sub.contextInfo.mentionedJID)
+            if jids:
+                return jids
+        except Exception:
+            continue
+    return []
 
 
 def parse_jid(jid_str: str):
@@ -181,6 +197,29 @@ def is_group_admin(chat, sender_str: str) -> bool:
         if Jid2String(p.JID).split("@")[0] == short_jid(sender_str):
             return p.IsAdmin or p.IsSuperAdmin
     return short_jid(sender_str) in config.OWNERS
+
+
+# Telefone do próprio bot, para detectar quando ele é mencionado.
+_bot_phone = [""]
+
+
+def _me_phone(refresh: bool = False) -> str:
+    if _bot_phone[0] and not refresh:
+        return _bot_phone[0]
+    try:
+        me = client.get_me()
+        _bot_phone[0] = me.JID.User or ""
+    except Exception:
+        _bot_phone[0] = ""
+    return _bot_phone[0]
+
+
+def bot_foi_mencionado(message) -> bool:
+    """True se o próprio bot está entre os mencionados da mensagem."""
+    eu = _me_phone()
+    if not eu:
+        return False
+    return any(short_jid(m) == eu for m in get_mentions(message))
 
 
 class Ctx:
@@ -666,6 +705,78 @@ def cmd_ia(ctx):
         ctx.reply(f"❌ IA indisponível: {exc}")
 
 
+# ─────────── IA: visão, imagem e pesquisa ───────────
+def _analisar_midia(ctx, prompt: str):
+    """Baixa a mídia (foto/vídeo, enviada ou citada) e manda para a IA de visão."""
+    try:
+        data, kind = get_media(ctx.msg)
+    except Exception as exc:
+        return ctx.reply(f"❌ Não consegui baixar a mídia: {exc}")
+    if not data:
+        return ctx.reply(
+            "🖼️ Envie uma *foto* (ou responda a uma) junto com o comando.\n"
+            "Ex: mande a imagem com a legenda `/analiseia o que é isso?`"
+        )
+
+    if kind == "video":
+        try:
+            data = media.video_frame(data)   # visão analisa imagem, não vídeo
+        except media.MediaError as exc:
+            return ctx.reply(f"❌ {exc}")
+        except Exception as exc:
+            return ctx.reply(f"❌ Erro ao ler o vídeo: {exc}")
+    elif kind != "image":
+        return ctx.reply("❌ Só consigo analisar *imagens* e *vídeos*.")
+
+    cfg = _ai_settings(ctx.chat_str)
+    try:
+        client.send_chat_presence(ctx.chat, 0, 0)
+    except Exception:
+        pass
+    try:
+        resposta = ai_vision(prompt, data, mode=cfg["mode"],
+                             name=cfg["name"], bio=cfg["bio"] or None)
+        deco = f"𓊆ྀི {cfg['name']} ❤︎𓊇 ◡̈"
+        ctx.reply(f"{deco} 👁️ *análise*\n{config.DECO_LINE}\n\n{resposta}")
+    except AIError as exc:
+        ctx.reply(f"❌ Não consegui analisar: {exc}")
+
+
+def cmd_analiseia(ctx):
+    """Analisa uma foto/vídeo com IA de visão."""
+    _analisar_midia(ctx, ctx.args.strip() or "Descreva esta imagem em detalhes, em português.")
+
+
+def cmd_gerarimagem(ctx):
+    if not ctx.args.strip():
+        return ctx.reply("🎨 Uso: /gerarimagem <descrição>\nEx: /gerarimagem um gato astronauta")
+    ctx.reply("🎨 Gerando a imagem… isso pode levar alguns segundos.")
+    try:
+        img = ai_generate_image(ctx.args.strip())
+    except AIError as exc:
+        return ctx.reply(f"❌ {exc}")
+    except Exception as exc:
+        return ctx.reply(f"❌ Erro ao gerar imagem: {exc}")
+    try:
+        client.send_image(ctx.chat, img, caption=f"🎨 {ctx.args.strip()[:200]}")
+    except Exception as exc:
+        ctx.reply(f"❌ Gerei a imagem mas não consegui enviar: {exc}")
+
+
+def cmd_pesquisa(ctx):
+    if not ctx.args.strip():
+        return ctx.reply("🔎 Uso: /pesquisa <assunto>\nEx: /pesquisa como funciona o PIX")
+    try:
+        client.send_chat_presence(ctx.chat, 0, 0)
+    except Exception:
+        pass
+    try:
+        resposta = ai_search(ctx.args.strip())
+        ctx.reply(f"🔎 *Pesquisa:* {ctx.args.strip()[:80]}\n{config.DECO_LINE}\n\n{resposta}")
+    except AIError as exc:
+        ctx.reply(f"❌ Pesquisa indisponível: {exc}")
+
+
 # ─────────── IA: configurações avançadas ───────────
 def cmd_iamode(ctx):
     if not ctx.is_group:
@@ -812,6 +923,10 @@ def cmd_help(ctx):
         f"🤖 *IA Avançada*\n"
         f"└─ {p}iamode {p}aimodel {p}thinking {p}aisetname {p}aisetbio\n"
         f"   {p}aichannel {p}aireset {p}aistatus\n\n"
+        f"👁️ *IA: visão, imagem e pesquisa*\n"
+        f"└─ {p}analiseia — analisa uma FOTO/VÍDEO (ou marque o bot na foto)\n"
+        f"   {p}gerarimagem — cria imagem a partir de texto\n"
+        f"   {p}pesquisa — pesquisa organizada sobre um assunto\n\n"
         f"👑 *Admin PRO (v3.1)*\n"
         f"└─ {p}giverole {p}temprole {p}tempban {p}softban {p}massrole\n"
         f"   {p}createrole {p}deleterole {p}setwelcome {p}setbye {p}autorole\n"
@@ -1962,6 +2077,10 @@ COMMANDS = {
     "iamode": cmd_iamode, "aimodel": cmd_aimodel, "thinking": cmd_thinking,
     "aisetname": cmd_aisetname, "aisetbio": cmd_aisetbio, "aisetavatar": cmd_aisetavatar,
     "aichannel": cmd_aichannel, "aireset": cmd_aireset, "aistatus": cmd_aistatus,
+    # ----- IA: visão, geração de imagem e pesquisa -----
+    "analiseia": cmd_analiseia, "analisar": cmd_analiseia, "vision": cmd_analiseia,
+    "gerarimagem": cmd_gerarimagem, "imagine": cmd_gerarimagem,
+    "pesquisa": cmd_pesquisa, "pesquisar": cmd_pesquisa,
     # ----- v3.1 PRO: admin -----
     "giverole": cmd_giverole, "temprole": cmd_temprole, "tempban": cmd_tempban,
     "softban": cmd_softban, "massrole": cmd_massrole, "createrole": cmd_createrole,
@@ -2020,17 +2139,28 @@ def handle_command(message, text):
 
 
 # ===================== EVENTOS =====================
-@client.event(ConnectedEv)
-def on_connected(_, __):
+def handle_connected():
     print(f"✅ {config.BOT_NAME} conectado ao WhatsApp!")
     _wa_ready.set()
+    _paired.set()  # encerra o loop de reconexão de pareamento
+    _me_phone(refresh=True)  # cacheia o próprio número (detectar menções)
     webui.set_connected()
+
+
+def handle_pair(message):
+    print(f"🔗 Pareado como: {message.ID.User}")
+    _paired.set()
+    webui.set_connected()
+
+
+@client.event(ConnectedEv)
+def on_connected(_, __):
+    handle_connected()
 
 
 @client.event(PairStatusEv)
 def on_pair(_, message):
-    print(f"🔗 Pareado como: {message.ID.User}")
-    webui.set_connected()
+    handle_pair(message)
 
 
 # ---- Diagnóstico de falhas de conexão -------------------------------------
@@ -2321,6 +2451,16 @@ def handle_message(message):
     except Exception:
         pass
 
+    # ----- VISÃO automática: mencionou o bot junto com uma foto/vídeo -----
+    # Acontece ANTES do "if not text" porque uma foto pode vir sem legenda.
+    try:
+        if _media_kind(message.Message) in ("image", "video") and bot_foi_mencionado(message):
+            pergunta = text or "Descreva esta imagem em detalhes, em português."
+            _analisar_midia(Ctx(message, "analiseia", pergunta), pergunta)
+            return
+    except Exception:
+        pass
+
     if not text:
         return
 
@@ -2404,38 +2544,53 @@ def _run_connect(on_error=None):
 
 
 def connect_with_paircode(number: str):
-    """Conecta usando código de pareamento (em vez de QR)."""
+    """Conecta usando código de pareamento (em vez de QR), no terminal.
+
+    Mesma dinâmica do modo web: o canal de QR do whatsmeow expira depois de
+    ~2 min e derruba o socket, então pedimos o código no instante em que o
+    evento de QR chega (conexão de pé) e reconectamos se expirar antes de
+    parear.
+    """
     number = _normalize_number(number)
     _wa_ready.clear()
-    # Registra handler de QR que: (1) sinaliza que o handshake concluiu e
-    # (2) suprime a exibição do QR no terminal (não faz sentido no modo código)
+    _paired.clear()
+    ja_pedido = threading.Event()
+
     def _silent_qr(_, __):
+        # Suprime o QR no terminal (não faz sentido no modo código), mas usa o
+        # evento como sinal de "conexão pronta para PairPhone".
         _wa_ready.set()
-    try:
-        client.event.qr(_silent_qr)
-    except Exception:
-        pass
-    t = threading.Thread(target=_run_connect, daemon=True)
-    t.start()
+        if _paired.is_set() or ja_pedido.is_set():
+            return
+        ja_pedido.set()
 
-    # se já existe sessão salva, conecta direto (sem pedir código)
-    time.sleep(3)
-    try:
-        already = client.is_logged_in
-    except Exception:
-        already = False
-
-    if not already:
-        print(f"📲 Solicitando código de pareamento para +{number}...")
-        if not _wait_wa_ready(35):
-            print("❌ WhatsApp não respondeu a tempo. Verifique sua internet e tente de novo.")
-        else:
+        def _pedir():
+            print(f"📲 Solicitando código de pareamento para +{number}...")
             code, err = _try_pair_phone(number)
             if code:
                 _print_pair_code(code)
             else:
                 print(f"❌ Não consegui gerar o código: {err}")
-    t.join()
+                ja_pedido.clear()  # deixa tentar de novo na próxima conexão
+
+        threading.Thread(target=_pedir, daemon=True).start()
+
+    try:
+        client.event.qr(_silent_qr)
+    except Exception:
+        pass
+
+    MAX_TENTATIVAS = 20
+    for tentativa in range(MAX_TENTATIVAS):
+        _wa_ready.clear()
+        _run_connect()
+        if _paired.is_set():
+            return
+        espera = min(3 + tentativa * 2, 20)
+        print(f"🔄 Canal de QR expirou (socket caiu). Reconectando em {espera}s… "
+              f"[{tentativa + 1}/{MAX_TENTATIVAS}]")
+        time.sleep(espera)
+    print("⛔ Limite de reconexões atingido sem parear. Reinicie e tente de novo.")
 
 
 # Sinalizado quando o WhatsApp termina o handshake e está pronto para parear.
@@ -2508,21 +2663,60 @@ def _try_pair_phone(number: str, attempts: int = 6):
     return None, last_err
 
 
+# Número aguardando pareamento. Preenchido quando o usuário envia o formulário
+# mas o socket já morreu; o handler de QR consome isso assim que uma conexão
+# nova fica de pé.
+_pending_number = [None]
+# Sinalizado quando o pareamento conclui — encerra o loop de reconexão.
+_paired = threading.Event()
+
+
+def _publish_pair_code(number: str):
+    """Pede o código ao WhatsApp e publica o resultado na página."""
+    code, err = _try_pair_phone(number)
+    if code:
+        pretty = f"{code[:4]}-{code[4:]}" if len(code) == 8 else code
+        print(f"🔑 Código de pareamento gerado: {pretty}")
+        webui.set_code(pretty)
+    else:
+        webui.set_error(f"Não consegui gerar o código: {err}")
+
+
 def _request_pair_code(number: str):
-    """Pede um código de pareamento e publica na página web (usado por /pair)."""
+    """Chamado pelo formulário da página web.
+
+    O socket do WhatsApp cai sozinho quando o canal de QR do whatsmeow expira
+    (ele emite alguns QRs por ~2 min e fecha o canal; nos logs isso aparece
+    como "failed to read frame header: EOF"). Era exatamente por isso que dava
+    "websocket not connected" quando o usuário demorava para digitar o número.
+
+    Em vez de tentar parear num socket morto, enfileiramos o número: o loop de
+    reconexão levanta uma conexão nova e o handler de QR dispara o pareamento
+    assim que ela estiver de pé — que é o momento em que o whatsmeow aceita
+    PairPhone.
+    """
     number = _normalize_number(number)
     if not number:
         webui.set_error("Número inválido. Use DDI+DDD+número, só dígitos (ex: 5511999999999).")
         return
-    if not _wait_wa_ready(35):
-        webui.set_error("WhatsApp ainda não respondeu. Aguarde o QR aparecer e tente de novo.")
+
+    socket_vivo = _wa_ready.is_set()
+    if socket_vivo:
+        try:
+            socket_vivo = client.is_connected
+        except Exception:
+            socket_vivo = False
+
+    if socket_vivo:
+        _publish_pair_code(number)
         return
-    code, err = _try_pair_phone(number)
-    if code:
-        pretty = f"{code[:4]}-{code[4:]}" if len(code) == 8 else code
-        webui.set_code(pretty)
-    else:
-        webui.set_error(f"Não consegui gerar o código: {err}")
+
+    _pending_number[0] = number
+    print(f"⏳ Socket caído — número +{number} enfileirado para a próxima conexão.")
+    webui.set_error(
+        "Reconectando ao WhatsApp para gerar seu código… leva alguns segundos, "
+        "a página atualiza sozinha."
+    )
 
 
 def connect_web(number: str = ""):
@@ -2530,22 +2724,22 @@ def connect_web(number: str = ""):
     sem terminal interativo). Não bloqueia esperando input — quem decide se
     escaneia o QR ou digita o número é quem abrir a página no navegador.
 
-    IMPORTANTE: client.connect() do neonize é uma chamada ÚNICA e bloqueante
-    (só retorna quando client.stop() é chamado ou a conexão cai de vez).
-    O whatsmeow por baixo JÁ renova o QR Code sozinho, automaticamente,
-    disparando o callback de QR várias vezes dentro dessa MESMA chamada
-    (a cada ~20s, por alguns minutos) — não é preciso (e é arriscado)
-    parar e reconectar manualmente para "forçar" um novo QR.
+    O whatsmeow renova o QR Code sozinho dentro da MESMA chamada de connect()
+    — mas só por um tempo: depois de emitir alguns QRs (~2 min) ele encerra o
+    canal, connect() RETORNA e o socket morre. Por isso existe o loop de
+    reconexão abaixo: quando connect() retorna sem ter pareado, subimos uma
+    conexão nova. Isso é seguro porque só acontece DEPOIS que a conexão morreu
+    sozinha (bem diferente de matar uma conexão viva à força).
     """
     _wa_ready.clear()
+    _paired.clear()
     port = int(os.getenv("PORT", "8080"))
     webui.start(config.BOT_NAME, port, _request_pair_code)
     print(f"🌐 Página de pareamento em: http://0.0.0.0:{port}  (abra no navegador e escaneie o QR ou digite seu número)")
 
     def _on_qr(_, qr_data):
-        # Disparado automaticamente pelo whatsmeow a cada renovação do QR
-        # (várias vezes durante a mesma conexão) — handshake concluído,
-        # PairPhone já pode ser chamado a partir daqui.
+        # Disparado pelo whatsmeow a cada renovação do QR. Quando chega, a
+        # conexão está de pé e o PairPhone é aceito.
         _wa_ready.set()
         try:
             text = qr_data.decode() if isinstance(qr_data, (bytes, bytearray)) else str(qr_data)
@@ -2553,6 +2747,13 @@ def connect_web(number: str = ""):
             print("📷 QR Code atualizado.")
         except Exception as exc:
             webui.set_error(f"Erro ao gerar QR: {exc}")
+        # Conexão nova de pé: se alguém pediu código enquanto o socket estava
+        # morto, este é o momento certo de pedir de verdade.
+        pendente = _pending_number[0]
+        if pendente:
+            _pending_number[0] = None
+            print(f"▶️ Conexão restabelecida — pedindo código para +{pendente}.")
+            threading.Thread(target=_publish_pair_code, args=(pendente,), daemon=True).start()
 
     try:
         client.event.qr(_on_qr)
@@ -2565,7 +2766,30 @@ def connect_web(number: str = ""):
             f"arquivo de sessão salvo (SESSION_DB) e tente parear de novo do zero."
         )
 
-    t = threading.Thread(target=_run_connect, args=(_on_connect_error,), daemon=True)
+    def _connect_loop():
+        """Mantém uma conexão de pareamento viva até parear.
+
+        Se já existe sessão salva, o primeiro _run_connect() bloqueia servindo
+        mensagens e o loop nunca repete. Sem sessão, connect() volta a cada
+        expiração do canal de QR e reconectamos, com backoff, até o limite.
+        """
+        MAX_TENTATIVAS = 20  # ~15 min; evita martelar o WhatsApp (risco de ban)
+        for tentativa in range(MAX_TENTATIVAS):
+            _wa_ready.clear()
+            _run_connect(_on_connect_error)
+            if _paired.is_set():
+                return
+            espera = min(3 + tentativa * 2, 20)
+            print(f"🔄 Canal de QR expirou (socket caiu). Reconectando em {espera}s… "
+                  f"[{tentativa + 1}/{MAX_TENTATIVAS}]")
+            time.sleep(espera)
+        print("⛔ Limite de reconexões atingido sem parear.")
+        webui.set_error(
+            "Não consegui parear depois de várias tentativas. Reinicie o serviço "
+            "para tentar de novo."
+        )
+
+    t = threading.Thread(target=_connect_loop, daemon=True)
     t.start()
 
     def _startup_watchdog():
@@ -2591,15 +2815,17 @@ def connect_web(number: str = ""):
 
     threading.Thread(target=_startup_watchdog, daemon=True).start()
 
+    # PHONE_NUMBER definido no ambiente: enfileira para que o handler de QR
+    # peça o código assim que a conexão estiver pronta (sem race de timing).
     number = _normalize_number(number)
     if number:
-        time.sleep(3)
         try:
             already = client.is_logged_in
         except Exception:
             already = False
         if not already:
-            _request_pair_code(number)
+            _pending_number[0] = number
+            print(f"📲 PHONE_NUMBER definido — pedirei o código para +{number} assim que conectar.")
 
     t.join()
 

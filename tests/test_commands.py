@@ -471,6 +471,106 @@ def test_pro_games():
     print("✓ jogos PRO (50: cassino, RPG, sociais, adivinhação)")
 
 
+def test_ia_vision_image_search():
+    """Visão (/analiseia), geração de imagem e pesquisa — com a IA mockada."""
+    import ai as ai_mod
+
+    chamadas = {}
+
+    def fake_vision(prompt, image_bytes, mode=None, name=None, bio=None):
+        chamadas["vision"] = {"prompt": prompt, "bytes": len(image_bytes)}
+        return "Vejo um quadrado azul."
+
+    def fake_search(q):
+        chamadas["search"] = q
+        return "Resultado da pesquisa."
+
+    def fake_gen(p):
+        chamadas["image"] = p
+        return _real_png()
+
+    orig = (bot.ai_vision, bot.ai_search, bot.ai_generate_image)
+    bot.ai_vision, bot.ai_search, bot.ai_generate_image = fake_vision, fake_search, fake_gen
+    try:
+        # --- /analiseia com IMAGEM ---
+        f = run_media("/analiseia o que é isso?", media="image")
+        assert f.sent, "/analiseia não respondeu"
+        assert "Vejo um quadrado azul" in f.sent[-1]
+        assert chamadas["vision"]["prompt"] == "o que é isso?"
+        assert chamadas["vision"]["bytes"] > 0
+
+        # --- /analiseia sem argumento usa prompt padrão ---
+        chamadas.clear()
+        run_media("/analiseia", media="image")
+        assert "Descreva" in chamadas["vision"]["prompt"]
+
+        # --- /analiseia sem mídia orienta o usuário ---
+        f = run("/analiseia")
+        assert "foto" in f.sent[-1].lower()
+
+        # --- aliases ---
+        for alias in ("/analisar", "/vision"):
+            assert run_media(f"{alias} teste", media="image").sent, alias
+
+        # --- /pesquisa ---
+        f = run("/pesquisa como funciona o PIX")
+        assert "Resultado da pesquisa" in f.sent[-1]
+        assert chamadas["search"] == "como funciona o PIX"
+        assert "Uso:" in run("/pesquisa").sent[0]
+
+        # --- /gerarimagem ---
+        f = run("/gerarimagem um gato astronauta")
+        assert chamadas["image"] == "um gato astronauta"
+        assert ("image", "🎨 um gato astronauta") in f.actions
+        assert "Uso:" in run("/gerarimagem").sent[0]
+
+        # --- erro da IA vira mensagem amigável, não crash ---
+        def boom(*a, **k):
+            raise ai_mod.AIError("sem créditos")
+        bot.ai_generate_image = boom
+        f = run("/gerarimagem x")
+        assert "sem créditos" in f.sent[-1]
+    finally:
+        bot.ai_vision, bot.ai_search, bot.ai_generate_image = orig
+    print("✓ IA visão/imagem/pesquisa (/analiseia /gerarimagem /pesquisa)")
+
+
+def test_vision_on_mention():
+    """Mencionar o bot junto com uma foto dispara a visão automaticamente."""
+    chamadas = {}
+
+    def fake_vision(prompt, image_bytes, mode=None, name=None, bio=None):
+        chamadas["prompt"] = prompt
+        return "Análise automática."
+
+    orig_vision = bot.ai_vision
+    orig_phone = bot._bot_phone[0]
+    bot.ai_vision = fake_vision
+    bot._bot_phone[0] = "5599999999999"  # finge que o bot é esse número
+    try:
+        fake = FakeClient(admin=True)
+        bot.client = fake
+        # foto COM legenda mencionando o bot
+        msg = make_media_msg("o que tem aqui?", media="image")
+        msg.Message.imageMessage.contextInfo.mentionedJID.append(
+            "5599999999999@s.whatsapp.net"
+        )
+        bot.handle_message(msg)
+        assert chamadas.get("prompt") == "o que tem aqui?", "visão não disparou na menção"
+        assert "Análise automática" in fake.sent[-1]
+
+        # foto SEM menção não deve disparar visão
+        chamadas.clear()
+        fake2 = FakeClient(admin=True)
+        bot.client = fake2
+        bot.handle_message(make_media_msg("foto qualquer", media="image"))
+        assert "prompt" not in chamadas, "visão disparou sem menção ao bot"
+    finally:
+        bot.ai_vision = orig_vision
+        bot._bot_phone[0] = orig_phone
+    print("✓ visão automática ao marcar o bot numa foto")
+
+
 if __name__ == "__main__":
     test_utility_commands()
     test_economy_levels()
@@ -486,4 +586,6 @@ if __name__ == "__main__":
     test_pro_admin()
     test_pro_general()
     test_pro_games()
+    test_ia_vision_image_search()
+    test_vision_on_mention()
     print("\n✅ TODOS OS COMANDOS TESTADOS COM SUCESSO")

@@ -7,6 +7,7 @@ Características:
   só preenchem `reasoning`, ex.: z-ai/glm-4.5-air).
 - Pode cair para outro modelo da lista se o escolhido continuar falhando.
 """
+import base64
 import time
 import requests
 
@@ -47,20 +48,29 @@ def _extract(data: dict) -> str:
     return reasoning
 
 
-def _call_model(model_id: str, messages: list, timeout: int) -> str:
-    headers = {
+def _headers() -> dict:
+    return {
         "Authorization": f"Bearer {config.OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
         "HTTP-Referer": "https://github.com/thzyxbots",
         "X-Title": config.BOT_NAME,
     }
-    payload = {"model": model_id, "messages": messages, "max_tokens": 800}
+
+
+def _request(payload: dict, timeout: int, want) -> object:
+    """POST no OpenRouter com retry/backoff.
+
+    `want(data)` extrai o resultado desejado do JSON e devolve algo "falsy"
+    quando a resposta veio vazia (aí vale a pena tentar de novo).
+    """
+    if not config.OPENROUTER_API_KEY:
+        raise AIError("OPENROUTER_API_KEY não configurada (.env).")
 
     last_err = ""
     for attempt in range(MAX_RETRIES):
         try:
             resp = requests.post(
-                config.OPENROUTER_URL, headers=headers, json=payload, timeout=timeout
+                config.OPENROUTER_URL, headers=_headers(), json=payload, timeout=timeout
             )
         except requests.RequestException as exc:
             last_err = f"rede: {exc}"
@@ -74,9 +84,9 @@ def _call_model(model_id: str, messages: list, timeout: int) -> str:
                 last_err = str(data["error"])
                 time.sleep(2 ** attempt)
                 continue
-            text = _extract(data)
-            if text:
-                return text
+            result = want(data)
+            if result:
+                return result
             last_err = "resposta vazia"
             time.sleep(2 ** attempt)
             continue
@@ -93,10 +103,15 @@ def _call_model(model_id: str, messages: list, timeout: int) -> str:
             time.sleep(min(retry_after, 20))
             continue
 
-        # erro não recuperável (ex.: 400, 401)
+        # erro não recuperável (ex.: 400, 401, 402)
         raise AIError(f"OpenRouter HTTP {resp.status_code}: {resp.text[:200]}")
 
     raise AIError(f"Falha após {MAX_RETRIES} tentativas ({last_err})")
+
+
+def _call_model(model_id: str, messages: list, timeout: int) -> str:
+    payload = {"model": model_id, "messages": messages, "max_tokens": 800}
+    return _request(payload, timeout, _extract)
 
 
 def chat(prompt: str, model_key: str = None, history: list = None,
@@ -133,3 +148,108 @@ def chat(prompt: str, model_key: str = None, history: list = None,
             except AIError:
                 continue
     raise AIError("Todos os modelos de IA falharam no momento. Tente novamente.")
+
+
+# ===================== VISÃO (analisar imagem) =====================
+def _mime_for(kind: str, data: bytes) -> str:
+    """Descobre o mime pelos magic bytes (o WhatsApp manda jpeg/png/webp)."""
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    return "image/jpeg"
+
+
+def vision(prompt: str, image_bytes: bytes, mode: str = None,
+           name: str = None, bio: str = None) -> str:
+    """Analisa uma IMAGEM e responde em texto.
+
+    Usa um modelo com visão de verdade (input_modalities inclui "image").
+    Se o principal falhar, tenta os fallbacks — todos verificados no
+    catálogo do OpenRouter como capazes de receber imagem.
+    """
+    if not image_bytes:
+        raise AIError("Nenhuma imagem recebida para analisar.")
+
+    b64 = base64.b64encode(image_bytes).decode()
+    mime = _mime_for("image", image_bytes)
+    messages = [
+        {"role": "system", "content": _system_prompt(mode, name, bio)},
+        {"role": "user", "content": [
+            {"type": "text", "text": prompt or "Descreva esta imagem em detalhes."},
+            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+        ]},
+    ]
+
+    erros = []
+    for model_id in [config.AI_VISION_MODEL] + list(config.AI_VISION_FALLBACKS):
+        try:
+            return _call_model(model_id, messages, DEFAULT_TIMEOUT)
+        except AIError as exc:
+            erros.append(f"{model_id}: {exc}")
+            continue
+    raise AIError("Nenhum modelo de visão respondeu. " + " | ".join(erros[:2]))
+
+
+# ===================== PESQUISA =====================
+def search(query: str) -> str:
+    """Responde uma pergunta de pesquisa de forma organizada."""
+    if not query.strip():
+        raise AIError("Diga o que devo pesquisar.")
+    messages = [
+        {"role": "system", "content": (
+            "Você é um assistente de pesquisa em português. Responda de forma "
+            "organizada e objetiva, com os pontos principais em tópicos curtos. "
+            "Se não tiver certeza de algo, diga explicitamente que não tem "
+            "certeza — nunca invente fatos, datas ou números."
+        )},
+        {"role": "user", "content": query},
+    ]
+    return _call_model(config.AI_SEARCH_MODEL, messages, DEFAULT_TIMEOUT)
+
+
+# ===================== GERAÇÃO DE IMAGEM =====================
+def _extract_image(data: dict) -> bytes:
+    """Extrai os bytes da imagem gerada (OpenRouter devolve data URL)."""
+    try:
+        msg = data["choices"][0]["message"]
+    except (KeyError, IndexError, TypeError):
+        return b""
+    for img in (msg.get("images") or []):
+        url = (img.get("image_url") or {}).get("url", "")
+        if url.startswith("data:") and "base64," in url:
+            try:
+                return base64.b64decode(url.split("base64,", 1)[1])
+            except Exception:
+                continue
+    return b""
+
+
+def generate_image(prompt: str) -> bytes:
+    """Gera uma imagem a partir de um texto e devolve os bytes (PNG/JPEG).
+
+    Não existe modelo GRATUITO de geração de imagem no OpenRouter — este
+    endpoint consome créditos da conta. Se faltar crédito, o OpenRouter
+    responde 402 e a mensagem explica isso ao usuário.
+    """
+    if not prompt.strip():
+        raise AIError("Descreva a imagem que devo gerar.")
+    payload = {
+        "model": config.AI_IMAGE_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "modalities": ["image", "text"],
+    }
+    try:
+        return _request(payload, DEFAULT_TIMEOUT, _extract_image)
+    except AIError as exc:
+        texto = str(exc)
+        if "402" in texto or "credit" in texto.lower():
+            raise AIError(
+                "Geração de imagem exige créditos no OpenRouter (não há modelo "
+                "gratuito para isso). Adicione créditos em openrouter.ai/credits."
+            )
+        raise

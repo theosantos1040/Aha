@@ -131,3 +131,33 @@ def video_to_audio(video_bytes: bytes) -> bytes:
         raise MediaError(
             "não consegui extrair o áudio (o vídeo tem som?). " + last_err
         )
+
+
+# ──────────────────────── VÍDEO -> FRAME (p/ visão) ────────────────────────
+
+def video_frame(video_bytes: bytes) -> bytes:
+    """Extrai um quadro do vídeo como PNG, para análise por IA de visão.
+
+    Modelos de visão recebem imagem, não vídeo — então pegamos um frame
+    representativo (1s de vídeo, ou o primeiro se for mais curto).
+    """
+    if not has_ffmpeg():
+        raise MediaError(
+            "ffmpeg não encontrado — necessário para analisar vídeo. "
+            "Instale com: pkg install ffmpeg -y (Termux). "
+            "Dica: enviar uma FOTO funciona sem ffmpeg."
+        )
+    with tempfile.TemporaryDirectory() as tmp:
+        in_path = os.path.join(tmp, "in.mp4")
+        out_path = os.path.join(tmp, "frame.png")
+        with open(in_path, "wb") as fh:
+            fh.write(video_bytes)
+        # tenta pegar em 1s; se o vídeo for menor, cai para o primeiro frame
+        for seek in (["-ss", "1"], []):
+            cmd = ["ffmpeg", "-y", *seek, "-i", in_path,
+                   "-frames:v", "1", "-vf", "scale=768:-1", out_path]
+            proc = subprocess.run(cmd, capture_output=True, timeout=120)
+            if proc.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path):
+                with open(out_path, "rb") as fh:
+                    return fh.read()
+        raise MediaError("não consegui extrair um quadro desse vídeo.")

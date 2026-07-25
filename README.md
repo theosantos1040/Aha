@@ -219,7 +219,42 @@ Três modelos gratuitos, **testados de verdade (HTTP 200)**:
 
 > Os 4 modelos foram **testados ao vivo (HTTP 200)**. `gemini` usa
 > `google/gemma-4-31b-it:free` — não existe um *Gemini* gratuito no OpenRouter,
-> então usamos o modelo aberto do Google (Gemma).
+> então usamos o modelo aberto do Google (Gemma). O apelido `ling` usa
+> `inclusionai/ling-3.0-flash:free` (só texto).
+
+## 👁️ IA: visão, geração de imagem e pesquisa
+
+| Comando | O que faz | Modelo |
+|---|---|---|
+| `/analiseia` (`/analisar`, `/vision`) | Analisa uma **foto ou vídeo** (enviado ou citado) | `nvidia/nemotron-nano-12b-v2-vl:free` |
+| `/pesquisa` (`/pesquisar`) | Pesquisa organizada sobre um assunto | `openai/gpt-oss-20b:free` |
+| `/gerarimagem` (`/imagine`) | Gera imagem a partir de texto | `google/gemini-2.5-flash-image` |
+
+**Visão automática:** basta **marcar o bot numa foto/vídeo** — ele analisa sem
+precisar de comando. Com legenda, a legenda vira a pergunta.
+
+```
+/analiseia o que está escrito nessa placa?
+/pesquisa como funciona o PIX
+/gerarimagem um gato astronauta em aquarela
+```
+
+> ⚠️ **Sobre os modelos pedidos — o que existe de fato no OpenRouter:**
+>
+> | Pedido | Situação |
+> |---|---|
+> | `inclusionai/ling-3.0-flash:free` | ✅ existe, mas é **só texto** (`input_modalities: ["text"]`) — **não serve para visão**. Ficou disponível como `/IA ling`. |
+> | `black-forest-labs/flux.2-klein-4b` | ❌ **não existe** no catálogo do OpenRouter (nenhum modelo `flux`/`black-forest`). |
+> | `openai/gpt-oss-20b:free` | ✅ existe — é o modelo de `/pesquisa`. |
+>
+> Para **visão** usamos `nvidia/nemotron-nano-12b-v2-vl:free` (gratuito e aceita
+> imagem de verdade), com fallback para os Gemma. Para **gerar imagem** não há
+> nenhum modelo gratuito no OpenRouter — `/gerarimagem` usa o mais barato que
+> realmente gera (`google/gemini-2.5-flash-image`) e **consome créditos**; sem
+> crédito o bot avisa de forma clara. Todos configuráveis por `.env`
+> (`AI_VISION_MODEL`, `AI_SEARCH_MODEL`, `AI_IMAGE_MODEL`).
+>
+> 🎬 Analisar **vídeo** extrai um quadro com `ffmpeg`. **Foto funciona sem ffmpeg.**
 
 ## 👑 v3.1 PRO — +100 comandos
 

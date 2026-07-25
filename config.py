@@ -89,8 +89,31 @@ AI_MODELS = {
     "nex": "nex-agi/nex-n2-pro:free",         # existe, porém mais lento
     "glm": "z-ai/glm-4.5-air:free",           # devolve texto em "reasoning"
     "gemini": "google/gemma-4-31b-it:free",   # modelo do Google (Gemma; Gemini free não existe)
+    "ling": "inclusionai/ling-3.0-flash:free",  # texto (NÃO aceita imagem)
 }
 DEFAULT_AI_MODEL = "chatgpt"
+
+# ---- Modelos especializados -------------------------------------------
+# Todos conferidos no catálogo público do OpenRouter (/api/v1/models).
+#
+# VISÃO (/analiseia): precisa de "image" em input_modalities. O
+# inclusionai/ling-3.0-flash:free existe mas é SÓ TEXTO, então não serve
+# aqui — estes abaixo aceitam imagem de verdade e são gratuitos.
+AI_VISION_MODEL = os.getenv("AI_VISION_MODEL", "nvidia/nemotron-nano-12b-v2-vl:free")
+AI_VISION_FALLBACKS = [
+    "google/gemma-4-31b-it:free",
+    "google/gemma-4-26b-a4b-it:free",
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+]
+
+# PESQUISA (/pesquisa) — modelo de texto.
+AI_SEARCH_MODEL = os.getenv("AI_SEARCH_MODEL", "openai/gpt-oss-20b:free")
+
+# GERAÇÃO DE IMAGEM (/gerarimagem) — ATENÇÃO: o OpenRouter não tem nenhum
+# modelo gratuito que gere imagem, e black-forest-labs/flux.2-klein-4b não
+# existe no catálogo deles. Este é o mais barato que realmente gera imagem;
+# exige créditos na conta. Troque via AI_IMAGE_MODEL se quiser outro.
+AI_IMAGE_MODEL = os.getenv("AI_IMAGE_MODEL", "google/gemini-2.5-flash-image")
 
 # Personalidades da IA por grupo (/iamode). Cada modo injeta um trecho no
 # system prompt para mudar o tom das respostas.
