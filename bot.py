@@ -13,7 +13,18 @@ import time
 
 import neonize.proto.Neonize_pb2 as N
 from neonize.client import NewClient
-from neonize.events import ConnectedEv, GroupInfoEv, MessageEv, PairStatusEv
+from neonize.events import (
+    ClientOutdatedEv,
+    ConnectedEv,
+    ConnectFailureEv,
+    DisconnectedEv,
+    GroupInfoEv,
+    LoggedOutEv,
+    MessageEv,
+    PairStatusEv,
+    StreamErrorEv,
+    TemporaryBanEv,
+)
 from neonize.exc import PairPhoneError
 from neonize.utils.enum import MediaType, MediaTypeToMMS, ParticipantChange, VoteType
 from neonize.utils.jid import build_jid, Jid2String
@@ -2020,6 +2031,96 @@ def on_connected(_, __):
 def on_pair(_, message):
     print(f"🔗 Pareado como: {message.ID.User}")
     webui.set_connected()
+
+
+# ---- Diagnóstico de falhas de conexão -------------------------------------
+# Sem isso, PairPhone() falha com "websocket not connected" e não há como
+# saber POR QUE o socket caiu (ban temporário? stream error? logout remoto?
+# client desatualizado?). Esses eventos expõem a causa real do neonize.
+# Lógica em funções separadas (testáveis) — o decorator @client.event()
+# sempre retorna None, então não dá pra chamar o nome decorado diretamente.
+def handle_connect_failure(event):
+    _wa_ready.clear()
+    try:
+        reason_name = N.ConnectFailureReason.Name(event.Reason)
+    except Exception:
+        reason_name = str(event.Reason)
+    reason = f"{reason_name} — {event.Message}" if event.Message else reason_name
+    print(f"❌ Falha ao conectar ao WhatsApp: {reason}")
+    webui.set_error(f"O WhatsApp recusou a conexão: {reason}")
+
+
+def handle_disconnected(event):
+    _wa_ready.clear()
+    print(f"🔌 Desconectado do WhatsApp (status booleano={event.status}).")
+    webui.set_error("Conexão com o WhatsApp caiu. Recarregue a página em alguns segundos.")
+
+
+def handle_stream_error(event):
+    _wa_ready.clear()
+    print(f"⚠️ Erro de stream do WhatsApp: code={event.Code} raw={event.Raw}")
+    webui.set_error(f"Erro de stream do WhatsApp (code={event.Code}). Tente novamente em alguns instantes.")
+
+
+def handle_logged_out(event):
+    _wa_ready.clear()
+    try:
+        reason_name = N.ConnectFailureReason.Name(event.Reason)
+    except Exception:
+        reason_name = str(event.Reason)
+    print(f"🚪 Sessão desconectada pelo WhatsApp: {reason_name} (on_connect={event.OnConnect})")
+    webui.set_error(
+        f"O WhatsApp encerrou a sessão salva ({reason_name}). Apague o arquivo "
+        f"SESSION_DB e pareie de novo do zero."
+    )
+
+
+def handle_temp_ban(event):
+    _wa_ready.clear()
+    print(f"🚫 Banimento temporário do WhatsApp: code={event.Code} expira={event.Expire}")
+    webui.set_error(
+        f"O WhatsApp aplicou um bloqueio temporário neste número/IP (code={event.Code}). "
+        f"Espere e tente de novo mais tarde."
+    )
+
+
+def handle_client_outdated():
+    _wa_ready.clear()
+    print("📛 O WhatsApp recusou a conexão: versão do cliente (neonize/whatsmeow) desatualizada.")
+    webui.set_error(
+        "O WhatsApp recusou a conexão por versão de cliente desatualizada. "
+        "Atualize o pacote neonize (pip install -U neonize) e reinicie o bot."
+    )
+
+
+@client.event(ConnectFailureEv)
+def on_connect_failure(_, event):
+    handle_connect_failure(event)
+
+
+@client.event(DisconnectedEv)
+def on_disconnected(_, event):
+    handle_disconnected(event)
+
+
+@client.event(StreamErrorEv)
+def on_stream_error(_, event):
+    handle_stream_error(event)
+
+
+@client.event(LoggedOutEv)
+def on_logged_out(_, event):
+    handle_logged_out(event)
+
+
+@client.event(TemporaryBanEv)
+def on_temp_ban(_, event):
+    handle_temp_ban(event)
+
+
+@client.event(ClientOutdatedEv)
+def on_client_outdated(_, __):
+    handle_client_outdated()
 
 
 @client.event(GroupInfoEv)
