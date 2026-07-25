@@ -571,6 +571,33 @@ def test_vision_on_mention():
     print("✓ visão automática ao marcar o bot numa foto")
 
 
+def test_is_from_me_commands():
+    """Dono (IsFromMe=True) consegue usar comandos; mensagens comuns são ignoradas."""
+    def _make_from_me(text, has_prefix=True):
+        msg = N.Message()
+        msg.Info.MessageSource.Chat.CopyFrom(GROUP)
+        msg.Info.MessageSource.Sender.CopyFrom(SENDER)
+        msg.Info.MessageSource.IsGroup = True
+        msg.Info.MessageSource.IsFromMe = True
+        msg.Info.ID = "OWNER1"
+        msg.Message.conversation = text
+        return msg
+
+    fake = FakeClient(admin=True)
+    bot.client = fake
+
+    # Comando com prefixo → deve ser processado
+    bot.handle_message(_make_from_me("/ping"))
+    assert any("Pong" in s for s in fake.sent), "IsFromMe + /ping não respondeu"
+
+    # Mensagem sem prefixo → deve ser ignorada
+    sent_before = len(fake.sent)
+    bot.handle_message(_make_from_me("oi tudo bem"))
+    assert len(fake.sent) == sent_before, "IsFromMe sem prefixo não deveria responder"
+
+    print("✓ IsFromMe: dono usa /ping; mensagem sem prefixo é ignorada")
+
+
 if __name__ == "__main__":
     test_utility_commands()
     test_economy_levels()
@@ -588,4 +615,5 @@ if __name__ == "__main__":
     test_pro_games()
     test_ia_vision_image_search()
     test_vision_on_mention()
+    test_is_from_me_commands()
     print("\n✅ TODOS OS COMANDOS TESTADOS COM SUCESSO")

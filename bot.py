@@ -2376,8 +2376,6 @@ def on_message(_, message):
 
 def handle_message(message):
     src = message.Info.MessageSource
-    if src.IsFromMe:
-        return
 
     chat = src.Chat
     chat_str = Jid2String(chat)
@@ -2385,6 +2383,18 @@ def handle_message(message):
     phone = short_jid(sender_str)
     msg_id = message.Info.ID
     text = get_text(message)
+
+    # Mensagens do próprio número: só processa se for um comando (prefixo).
+    # Isso permite que o dono use o bot pelo próprio WhatsApp, mas evita
+    # que o bot reaja às próprias respostas que envia ou a mensagens comuns.
+    if src.IsFromMe:
+        try:
+            pfx = db.get_prefix(chat_str)
+        except Exception:
+            pfx = "/"
+        if not text.startswith(pfx):
+            return
+
     if text:
         print(f"📩 [{phone}] {text[:80]}")
 
@@ -2408,7 +2418,7 @@ def handle_message(message):
 
     # ----- MUTE: apaga msgs do silenciado + avisa (máx. 3x) -----
     try:
-        if src.IsGroup and "muted" in db.get_roles(chat_str, phone):
+        if src.IsGroup and not src.IsFromMe and "muted" in db.get_roles(chat_str, phone):
             revoke(chat, sender_str, msg_id)
             kc = (chat_str, phone)
             if _mute_warns[kc] < 3:
@@ -2419,7 +2429,7 @@ def handle_message(message):
         pass
 
     # ----- automoderação (antilink / antispam) -----
-    if src.IsGroup and text and not _is_exempt(chat, chat_str, sender_str):
+    if src.IsGroup and not src.IsFromMe and text and not _is_exempt(chat, chat_str, sender_str):
         # ANTILINK
         try:
             if db.get_setting(chat_str, "antilink") == "1" and LINK_RE.search(text):
@@ -2456,7 +2466,7 @@ def handle_message(message):
 
     # auto-remover banidos
     try:
-        if src.IsGroup and db.is_banned(chat_str, phone):
+        if src.IsGroup and not src.IsFromMe and db.is_banned(chat_str, phone):
             client.update_group_participants(chat, [src.Sender], ParticipantChange.REMOVE)
             return
     except Exception:
