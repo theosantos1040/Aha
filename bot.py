@@ -2393,8 +2393,12 @@ def connect_web(number: str = ""):
 
     def _start_connection():
         with _conn_lock:
-            if _conn_thread[0] and _conn_thread[0].is_alive():
+            prev = _conn_thread[0]
+            # Só bloqueia nova conexão se a thread anterior ainda está viva
+            # (stop()/disconnect() encerra a thread, então is_alive() fica False)
+            if prev and prev.is_alive():
                 return
+            _wa_ready.clear()
             t = threading.Thread(target=client.connect, daemon=True)
             _conn_thread[0] = t
             t.start()
@@ -2415,24 +2419,33 @@ def connect_web(number: str = ""):
         pass
 
     def _force_new_qr():
-        """Reconecta para forçar o WhatsApp a gerar um novo QR Code."""
+        """Para o client completamente e reconecta para forçar novo QR Code."""
+        if webui._state.get("connected"):
+            return
         print(f"🔄 Renovando QR Code (expira a cada {webui.QR_TTL}s)…")
         _wa_ready.clear()
+        webui.set_refreshing()
+        # Para a conexão atual completamente antes de abrir nova
         try:
-            client.Disconnect()
+            client.stop()
         except Exception:
-            pass
-        time.sleep(2)
-        _start_connection()
+            try:
+                client.disconnect()
+            except Exception:
+                pass
+        time.sleep(5)  # aguarda o Go side finalizar antes de reconectar
+        if not webui._state.get("connected"):
+            _start_connection()
 
     webui.set_refresh_callback(_force_new_qr)
 
     def _qr_watchdog():
-        """Renova o QR automaticamente a cada QR_TTL segundos enquanto não parear."""
+        """Renova o QR automaticamente enquanto não parear."""
         while True:
             time.sleep(webui.QR_TTL)
             if webui._state.get("connected"):
                 return
+            # Não renova enquanto o usuário está usando um código
             if webui._state.get("code"):
                 continue
             _force_new_qr()
