@@ -2479,8 +2479,9 @@ def handle_message(message):
             pergunta = text or "Descreva esta imagem em detalhes, em português."
             _analisar_midia(Ctx(message, "analiseia", pergunta), pergunta)
             return
-    except Exception:
-        pass
+    except Exception as exc:
+        # não derruba a mensagem, mas também não engole o motivo em silêncio
+        print(f"⚠️ Visão automática falhou: {type(exc).__name__}: {exc}")
 
     if not text:
         return
@@ -2586,6 +2587,12 @@ def connect_with_paircode(number: str):
         ja_pedido.set()
 
         def _pedir():
+            # mesmo orçamento anti-bloqueio do modo web: o WhatsApp limita
+            # quantos códigos aceita gerar por número num intervalo curto
+            ok, motivo = _pair_budget(consume=True)
+            if not ok:
+                print(f"🛑 {motivo}")
+                return
             print(f"📲 Solicitando código de pareamento para +{number}...")
             code, err = _try_pair_phone(number)
             if code:
@@ -2601,10 +2608,14 @@ def connect_with_paircode(number: str):
     except Exception:
         pass
 
-    MAX_TENTATIVAS = 20
+    MAX_TENTATIVAS = 12
     tentativa = 0
     while True:
         _wa_ready.clear()
+        # O código morre junto com a conexão que o emitiu, então a conexão nova
+        # precisa poder emitir outro — sem isto só UM código era gerado em toda
+        # a execução e o usuário ficava esperando um código já inválido.
+        ja_pedido.clear()
         _run_connect()
         if not _paired.is_set():
             tentativa += 1
@@ -2649,15 +2660,51 @@ def _is_transient(msg: str) -> bool:
     return any(marker in m for marker in _TRANSIENT_MARKERS)
 
 
-def _try_pair_phone(number: str, attempts: int = 6):
-    """Chama PairPhone algumas vezes, devolvendo (código, None) ou
-    (None, mensagem_de_erro_real).
+# ---- Orçamento de pedidos de pareamento (anti rate-limit) -----------------
+# Cada PairPhone é um pedido REAL ao WhatsApp: gera notificação no celular e
+# INVALIDA o código anterior. O WhatsApp limita quantos pedidos aceita por
+# número num intervalo curto — estourar isso faz ele simplesmente parar de
+# entregar o código, sem erro nenhum (era o sintoma: "a mensagem não chega").
+PAIR_MAX_REQUESTS = 3   # pedidos por execução do bot
+PAIR_COOLDOWN = 90      # segundos mínimos entre um pedido e o seguinte
 
-    Erros transitórios de socket ("websocket not connected"/"disconnected") são
-    comuns logo após o QR aparecer — o handshake HTTP termina antes do socket de
-    escrita ficar 100% pronto — então tentamos de novo aguardando is_connected
-    ficar True. Qualquer outra PairPhoneError é uma recusa definitiva do servidor
-    (número inválido, já pareado etc.) e não adianta repetir.
+_pair_lock = threading.Lock()
+_pair_count = [0]
+_pair_last_ts = [0.0]
+
+
+def _pair_budget(consume: bool = False):
+    """Diz se podemos pedir outro código agora. (ok, motivo_da_recusa)
+
+    Com consume=True já reserva a vaga — evita duas threads pedirem ao mesmo
+    tempo (o formulário da página e a renovação automática do evento de QR).
+    """
+    with _pair_lock:
+        if _pair_count[0] >= PAIR_MAX_REQUESTS:
+            return False, (
+                f"limite de {PAIR_MAX_REQUESTS} pedidos de código atingido nesta "
+                f"execução. O WhatsApp bloqueia números que pedem código demais. "
+                f"Use o QR Code acima, ou reinicie o serviço daqui a alguns minutos."
+            )
+        espera = PAIR_COOLDOWN - (time.time() - _pair_last_ts[0])
+        if _pair_last_ts[0] and espera > 0:
+            return False, (
+                f"aguarde {int(espera)}s antes de pedir outro código "
+                f"(evita bloqueio do WhatsApp por excesso de pedidos)."
+            )
+        if consume:
+            _pair_count[0] += 1
+            _pair_last_ts[0] = time.time()
+            print(f"📊 Pedido de código {_pair_count[0]}/{PAIR_MAX_REQUESTS}.")
+        return True, ""
+
+
+def _try_pair_phone(number: str, attempts: int = 2):
+    """Chama PairPhone, devolvendo (código, None) ou (None, erro_real).
+
+    attempts é BAIXO de propósito: cada tentativa é um pedido contabilizado
+    pelo WhatsApp. Só repetimos em erro transitório de socket (o handshake
+    termina um pouco antes do socket de escrita ficar pronto).
     """
     last_err = "erro desconhecido"
     for i in range(attempts):
@@ -2708,6 +2755,11 @@ _paired = threading.Event()
 
 def _publish_pair_code(number: str):
     """Pede o código ao WhatsApp e publica o resultado na página."""
+    ok, motivo = _pair_budget(consume=True)
+    if not ok:
+        print(f"🛑 Pedido de código bloqueado localmente: {motivo}")
+        webui.set_error(motivo)
+        return
     code, err = _try_pair_phone(number)
     if code:
         pretty = f"{code[:4]}-{code[4:]}" if len(code) == 8 else code
@@ -2810,17 +2862,26 @@ def connect_web(number: str = ""):
         except Exception as exc:
             webui.set_error(f"Erro ao gerar QR: {exc}")
 
-        # Conexão de pé: pede o código UMA vez por conexão. Vale tanto para o
-        # número enfileirado (socket estava morto quando o usuário pediu)
-        # quanto para renovar sozinho o código da conexão anterior, que morreu
-        # junto com ela.
-        alvo = _pending_number[0] or _last_number[0]
-        if alvo and not _paired.is_set() and not _code_req.is_set():
-            _code_req.set()
-            _pending_number[0] = None
-            _last_number[0] = alvo
-            print(f"▶️ Conexão de pé — gerando código para +{alvo}.")
-            threading.Thread(target=_publish_pair_code, args=(alvo,), daemon=True).start()
+        # Conexão de pé: pede o código no máximo UMA vez por conexão.
+        # Um pedido enfileirado (usuário mandou o número com o socket morto)
+        # tem prioridade e sempre vale. Já a RENOVAÇÃO automática só acontece
+        # se o código anterior realmente morreu — pedir um código novo com um
+        # ainda válido na tela invalidaria justamente o que o usuário está
+        # digitando, além de queimar o orçamento anti-bloqueio à toa.
+        pedido = _pending_number[0]
+        alvo = pedido or _last_number[0]
+        if not alvo or _paired.is_set() or _code_req.is_set():
+            return
+        if not pedido and webui.code_is_live():
+            return  # ainda há código válido na tela: não mexe
+        if not _pair_budget()[0]:
+            return  # sem orçamento: deixa o usuário usar o QR
+
+        _code_req.set()
+        _pending_number[0] = None
+        _last_number[0] = alvo
+        print(f"▶️ Conexão de pé — gerando código para +{alvo}.")
+        threading.Thread(target=_publish_pair_code, args=(alvo,), daemon=True).start()
 
     try:
         client.event.qr(_on_qr)
@@ -2843,7 +2904,10 @@ def connect_web(number: str = ""):
         reconecta automaticamente com backoff para retomar o recebimento de
         mensagens, sem precisar reparear.
         """
-        MAX_TENTATIVAS = 20  # ~15 min sem parear; evita martelar o WhatsApp
+        # Cada reconexão é um handshake novo com o WhatsApp. Poucas tentativas
+        # e backoff crescente: martelar o servidor é o caminho mais rápido para
+        # um bloqueio temporário do número/IP.
+        MAX_TENTATIVAS = 12
         tentativa = 0
         while True:
             _wa_ready.clear()
@@ -2863,7 +2927,7 @@ def connect_web(number: str = ""):
                         "para tentar de novo."
                     )
                     return
-                espera = min(3 + tentativa * 2, 20)
+                espera = min(5 + tentativa * 5, 60)
                 print(f"🔄 Canal de QR expirou (socket caiu). Reconectando em {espera}s… "
                       f"[{tentativa}/{MAX_TENTATIVAS}]")
             else:

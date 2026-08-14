@@ -547,6 +547,17 @@ def test_vision_on_mention():
     orig_phone = bot._bot_phone[0]
     bot.ai_vision = fake_vision
     bot._bot_phone[0] = "5599999999999"  # finge que o bot é esse número
+
+    # Isola o teste do estado de moderação deixado por testes anteriores:
+    # se SENDER estiver silenciado/banido, handle_message retorna ANTES de
+    # chegar na visão (era a causa da instabilidade deste teste).
+    gstr = bot.Jid2String(GROUP)
+    phone = bot.short_jid(bot.Jid2String(SENDER))
+    bot.db.remove_role(gstr, phone, "muted")
+    bot.db.remove_ban(gstr, phone)
+    bot.db.set_setting(gstr, "antispam", "0")
+    bot.db.set_setting(gstr, "antilink", "0")
+    bot._spam_track.pop((gstr, phone), None)
     try:
         fake = FakeClient(admin=True)
         bot.client = fake
@@ -556,8 +567,15 @@ def test_vision_on_mention():
             "5599999999999@s.whatsapp.net"
         )
         bot.handle_message(msg)
-        assert chamadas.get("prompt") == "o que tem aqui?", "visão não disparou na menção"
-        assert "Análise automática" in fake.sent[-1]
+        assert chamadas.get("prompt") == "o que tem aqui?", (
+            f"visão não disparou na menção | chamadas={chamadas} "
+            f"| sent={fake.sent} | bot_phone={bot._bot_phone[0]!r} "
+            f"| kind={bot._media_kind(msg.Message)!r} "
+            f"| mencoes={bot.get_mentions(msg)}"
+        )
+        # `any` em vez de [-1]: threads de fundo de comandos anteriores
+        # (ex.: /reaction) podem escrever neste mesmo FakeClient
+        assert any("Análise automática" in s for s in fake.sent), fake.sent
 
         # foto SEM menção não deve disparar visão
         chamadas.clear()

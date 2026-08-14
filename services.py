@@ -3,13 +3,27 @@ import requests
 
 
 def qr_png(text: str) -> bytes:
-    """Gera um QR Code (PNG) via api.qrserver.com — sem chave."""
-    r = requests.get(
-        "https://api.qrserver.com/v1/create-qr-code/",
-        params={"size": "400x400", "data": text}, timeout=30,
-    )
-    r.raise_for_status()
-    return r.content
+    """Gera um QR Code (PNG) LOCALMENTE, sem rede.
+
+    Antes isso ia para api.qrserver.com. Duas razões para não fazer mais isso:
+
+    1. Segurança: o QR de pareamento do WhatsApp carrega as credenciais de
+       vinculação do aparelho. Mandar esse conteúdo para um servidor de
+       terceiros entrega a quem o receber a chance de parear no seu lugar.
+    2. Confiabilidade: era uma chamada HTTP bloqueante (timeout de 30s) feita
+       DENTRO do callback de QR do whatsmeow, que roda a cada ~20s. Se o
+       serviço demorasse ou estivesse bloqueado (rede do Render, por exemplo),
+       o QR simplesmente nunca aparecia.
+
+    O `segno` já vem junto com o neonize, então não há dependência nova.
+    """
+    import io
+
+    import segno
+
+    buf = io.BytesIO()
+    segno.make_qr(text).save(buf, kind="png", scale=10, border=2)
+    return buf.getvalue()
 
 
 def shorten_url(url: str) -> str:
