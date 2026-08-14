@@ -19,35 +19,64 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
 
-QR_TTL = 20  # estimativa em segundos p/ barra visual (whatsmeow costuma renovar por volta disso)
+QR_TTL = 20   # cada QR do whatsmeow vale ~20s (barra visual)
+CODE_TTL = 120  # o código de pareamento só vale enquanto a conexão viver (~2 min)
 
 _lock = threading.Lock()
 _state = {
     "qr_png": None,      # bytes do PNG do QR atual (ou None)
     "qr_time": None,     # epoch em que o QR foi gerado
     "code": None,        # código de pareamento já formatado (ou None)
+    "code_time": None,   # epoch em que o código foi emitido
     "connected": False,  # já pareado com o WhatsApp?
     "error": None,
     "requesting": False,
 }
 _bot_name = ["ThzyxBoTS"]
 _pair_callback = None    # func(numero: str) chamada quando o form é enviado
+_revoke_callback = None  # func() chamada quando o usuário revoga o código
 
 
 def set_qr(png_bytes: bytes):
+    """Publica um QR novo.
+
+    NÃO mexe no código de pareamento: o whatsmeow renova o QR a cada ~20s e,
+    se isso apagasse o código, ele sumiria da tela antes do usuário conseguir
+    digitá-lo no celular (era exatamente por isso que parear por código nunca
+    funcionava).
+    """
     with _lock:
         _state["qr_png"] = png_bytes
         _state["qr_time"] = time.time()
-        _state["code"] = None
         _state["error"] = None
 
 
 def set_code(code: str):
     with _lock:
         _state["code"] = code
-        _state["qr_png"] = None
-        _state["qr_time"] = None
+        _state["code_time"] = time.time()
         _state["error"] = None
+        _state["requesting"] = False
+
+
+def code_is_live() -> bool:
+    """True se existe um código ainda dentro da validade."""
+    with _lock:
+        if not _state["code"] or not _state["code_time"]:
+            return False
+        return (time.time() - _state["code_time"]) < CODE_TTL
+
+
+def expire_code():
+    """Invalida o código atual — usado quando a conexão que o emitiu morreu.
+
+    O código de pareamento do WhatsApp só vale enquanto o socket que o gerou
+    estiver vivo. Deixar o código antigo na tela faria o usuário digitar um
+    código morto e o pareamento falharia sem explicação.
+    """
+    with _lock:
+        _state["code"] = None
+        _state["code_time"] = None
         _state["requesting"] = False
 
 
@@ -57,6 +86,8 @@ def set_connected():
         _state["qr_png"] = None
         _state["qr_time"] = None
         _state["code"] = None
+        _state["code_time"] = None
+        _state["error"] = None
 
 
 def set_error(msg: str):
@@ -66,10 +97,17 @@ def set_error(msg: str):
 
 
 def revoke_code():
-    """Cancela/revoga o código atual e limpa o estado (volta pra tela de input)."""
+    """Cancela/revoga o código atual e volta pra tela de input."""
     with _lock:
         _state["code"] = None
+        _state["code_time"] = None
         _state["error"] = None
+        _state["requesting"] = False
+    if _revoke_callback:
+        try:
+            _revoke_callback()
+        except Exception:
+            pass
 
 
 PAGE = """<!doctype html>
@@ -143,6 +181,7 @@ PAGE = """<!doctype html>
 
       <!-- Código de pareamento -->
       <div class="code hidden" id="codeBox"></div>
+      <p class="countdown-label hidden" id="codeCountdown"></p>
       <p class="sub hidden" id="codeHint">
         WhatsApp &gt; Aparelhos conectados &gt; Conectar com número de telefone
       </p>
@@ -165,6 +204,7 @@ PAGE = """<!doctype html>
   </div>
   <script>
     const QR_TTL = {qr_ttl};
+    const CODE_TTL = {code_ttl};
     const form = document.getElementById('pairForm');
 
     form.addEventListener('submit', async (e) => {{
@@ -212,7 +252,10 @@ PAGE = """<!doctype html>
         return;
       }}
 
-      // QR section
+      const hasCode = !!s.code;
+
+      // QR section — fica escondida enquanto houver um código válido na tela,
+      // pra não competir com ele (o QR continua sendo renovado por baixo).
       const qrSection = document.getElementById('qrSection');
       const qrImg = document.getElementById('qrImg');
       if (s.qr && s.qr !== lastQr) {{
@@ -220,22 +263,31 @@ PAGE = """<!doctype html>
         lastQr = s.qr;
         startCountdown(s.qr_age || 0);
       }}
-      qrSection.classList.toggle('hidden', !s.qr);
+      qrSection.classList.toggle('hidden', hasCode || !s.qr);
 
       // Spinner: só aparece antes do primeiro QR/código/erro chegar
-      const waitingFirst = !s.qr && !s.code && !s.error;
+      const waitingFirst = !s.qr && !hasCode && !s.error;
       document.getElementById('refreshingView').classList.toggle('hidden', !waitingFirst);
 
-      // Código
+      // Código + validade real (o código morre junto com a conexão)
       const codeBox = document.getElementById('codeBox');
-      if (s.code) codeBox.textContent = s.code;
-      codeBox.classList.toggle('hidden', !s.code);
-      document.getElementById('codeHint').classList.toggle('hidden', !s.code);
-      document.getElementById('codeActions').classList.toggle('hidden', !s.code);
+      if (hasCode) codeBox.textContent = s.code;
+      codeBox.classList.toggle('hidden', !hasCode);
+      document.getElementById('codeHint').classList.toggle('hidden', !hasCode);
+      document.getElementById('codeActions').classList.toggle('hidden', !hasCode);
+
+      const cd = document.getElementById('codeCountdown');
+      cd.classList.toggle('hidden', !hasCode);
+      if (hasCode) {{
+        const left = Math.max(0, Math.round(CODE_TTL - (s.code_age || 0)));
+        cd.textContent = left > 0
+          ? 'válido por mais ' + left + 's — depois um novo é gerado sozinho'
+          : 'expirado, gerando outro…';
+      }}
 
       // Formulário — esconde enquanto código está visível
-      form.classList.toggle('hidden', !!s.code);
-      document.getElementById('stepsText').classList.toggle('hidden', !!s.code);
+      form.classList.toggle('hidden', hasCode);
+      document.getElementById('stepsText').classList.toggle('hidden', hasCode);
 
       // Erro
       const errText = document.getElementById('errText');
@@ -269,16 +321,24 @@ class _Handler(BaseHTTPRequestHandler):
             body = PAGE.format(
                 bot_name=html.escape(_bot_name[0]),
                 qr_ttl=QR_TTL,
+                code_ttl=CODE_TTL,
             ).encode("utf-8")
             self._send(200, "text/html; charset=utf-8", body)
         elif self.path == "/status.json":
+            # o código morre junto com a conexão que o emitiu — some sozinho
+            # quando passa do tempo, em vez de deixar um código morto na tela
+            if _state["code"] and not code_is_live():
+                expire_code()
             with _lock:
-                qr_age = round(time.time() - _state["qr_time"], 1) if _state["qr_time"] else None
+                now = time.time()
+                qr_age = round(now - _state["qr_time"], 1) if _state["qr_time"] else None
+                code_age = round(now - _state["code_time"], 1) if _state["code_time"] else None
                 payload = {
                     "connected": _state["connected"],
                     "qr": base64.b64encode(_state["qr_png"]).decode() if _state["qr_png"] else None,
                     "qr_age": qr_age,
                     "code": _state["code"],
+                    "code_age": code_age,
                     "error": _state["error"],
                 }
             self._send(200, "application/json", json.dumps(payload).encode("utf-8"))
@@ -312,11 +372,12 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
 
-def start(bot_name: str, port: int, pair_callback):
+def start(bot_name: str, port: int, pair_callback, revoke_callback=None):
     """Sobe o servidor de pareamento em background (não bloqueia)."""
-    global _pair_callback
+    global _pair_callback, _revoke_callback
     _bot_name[0] = bot_name
     _pair_callback = pair_callback
+    _revoke_callback = revoke_callback
     server = ThreadingHTTPServer(("0.0.0.0", port), _Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server

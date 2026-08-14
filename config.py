@@ -81,6 +81,11 @@ DATA_DB = os.getenv("DATA_DB", "bot_data.sqlite3")
 
 OWNERS = [o.strip() for o in os.getenv("OWNERS", "").split(",") if o.strip()]
 
+# Número que recebe o código de pareamento automaticamente ao subir o bot.
+# Só dígitos, com DDI+DDD. Pode ser trocado pela variável de ambiente
+# PHONE_NUMBER (útil no Render/Termux sem mexer no código).
+PHONE_NUMBER = "".join(c for c in os.getenv("PHONE_NUMBER", "5524992506307") if c.isdigit())
+
 # Modelos de IA disponíveis no comando /IA.
 # Foram testados de verdade contra o OpenRouter (HTTP 200).
 # Chave amigável -> id real do modelo.

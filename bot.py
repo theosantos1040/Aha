@@ -2695,6 +2695,13 @@ def _try_pair_phone(number: str, attempts: int = 6):
 # mas o socket já morreu; o handler de QR consome isso assim que uma conexão
 # nova fica de pé.
 _pending_number = [None]
+# Último número pedido — usado para RENOVAR o código automaticamente a cada
+# conexão nova, já que o código do WhatsApp morre junto com o socket que o
+# emitiu (~2 min). Sem isso o usuário ficaria olhando um código morto.
+_last_number = [None]
+# Garante um único pedido de código por conexão (o evento de QR dispara a cada
+# ~20s dentro da MESMA conexão; sem esta trava pediríamos código sem parar).
+_code_req = threading.Event()
 # Sinalizado quando o pareamento conclui — encerra o loop de reconexão.
 _paired = threading.Event()
 
@@ -2728,6 +2735,9 @@ def _request_pair_code(number: str):
         webui.set_error("Número inválido. Use DDI+DDD+número, só dígitos (ex: 5511999999999).")
         return
 
+    # guarda o número para renovar o código sozinho a cada conexão nova
+    _last_number[0] = number
+
     socket_vivo = _wa_ready.is_set()
     if socket_vivo:
         try:
@@ -2736,6 +2746,7 @@ def _request_pair_code(number: str):
             socket_vivo = False
 
     if socket_vivo:
+        _code_req.set()
         _publish_pair_code(number)
         return
 
@@ -2745,6 +2756,18 @@ def _request_pair_code(number: str):
         "Reconectando ao WhatsApp para gerar seu código… leva alguns segundos, "
         "a página atualiza sozinha."
     )
+
+
+def _cancel_pair_request():
+    """Chamado pelo botão 'Revogar código' da página.
+
+    Além de limpar a tela, para a renovação automática — senão o próximo QR
+    geraria um código novo logo depois do usuário ter cancelado.
+    """
+    _pending_number[0] = None
+    _last_number[0] = None
+    _code_req.set()  # impede novo pedido nesta conexão
+    print("🚫 Código revogado pelo usuário — renovação automática desligada.")
 
 
 def connect_web(number: str = ""):
@@ -2761,8 +2784,19 @@ def connect_web(number: str = ""):
     """
     _wa_ready.clear()
     _paired.clear()
+    _code_req.clear()
+
+    # Número já conhecido (PHONE_NUMBER): enfileira ANTES de subir a conexão,
+    # senão o primeiro evento de QR chega antes da atribuição e o pedido só
+    # aconteceria no ciclo seguinte (~2 min depois).
+    number = _normalize_number(number)
+    if number:
+        _pending_number[0] = number
+        _last_number[0] = number
+        print(f"📲 PHONE_NUMBER definido — vou gerar o código para +{number} automaticamente.")
+
     port = int(os.getenv("PORT", "8080"))
-    webui.start(config.BOT_NAME, port, _request_pair_code)
+    webui.start(config.BOT_NAME, port, _request_pair_code, _cancel_pair_request)
     print(f"🌐 Página de pareamento em: http://0.0.0.0:{port}  (abra no navegador e escaneie o QR ou digite seu número)")
 
     def _on_qr(_, qr_data):
@@ -2775,13 +2809,18 @@ def connect_web(number: str = ""):
             print("📷 QR Code atualizado.")
         except Exception as exc:
             webui.set_error(f"Erro ao gerar QR: {exc}")
-        # Conexão nova de pé: se alguém pediu código enquanto o socket estava
-        # morto, este é o momento certo de pedir de verdade.
-        pendente = _pending_number[0]
-        if pendente:
+
+        # Conexão de pé: pede o código UMA vez por conexão. Vale tanto para o
+        # número enfileirado (socket estava morto quando o usuário pediu)
+        # quanto para renovar sozinho o código da conexão anterior, que morreu
+        # junto com ela.
+        alvo = _pending_number[0] or _last_number[0]
+        if alvo and not _paired.is_set() and not _code_req.is_set():
+            _code_req.set()
             _pending_number[0] = None
-            print(f"▶️ Conexão restabelecida — pedindo código para +{pendente}.")
-            threading.Thread(target=_publish_pair_code, args=(pendente,), daemon=True).start()
+            _last_number[0] = alvo
+            print(f"▶️ Conexão de pé — gerando código para +{alvo}.")
+            threading.Thread(target=_publish_pair_code, args=(alvo,), daemon=True).start()
 
     try:
         client.event.qr(_on_qr)
@@ -2808,10 +2847,14 @@ def connect_web(number: str = ""):
         tentativa = 0
         while True:
             _wa_ready.clear()
+            _code_req.clear()  # a conexão nova pode emitir um código novo
             _run_connect(_on_connect_error)
 
             if not _paired.is_set():
-                # ainda não pareou — conta como tentativa de QR
+                # A conexão morreu: o código emitido por ela morreu junto. Tira
+                # da tela para o usuário não digitar um código já inválido — o
+                # próximo QR gera outro automaticamente.
+                webui.expire_code()
                 tentativa += 1
                 if tentativa >= MAX_TENTATIVAS:
                     print("⛔ Limite de reconexões atingido sem parear.")
@@ -2856,18 +2899,6 @@ def connect_web(number: str = ""):
 
     threading.Thread(target=_startup_watchdog, daemon=True).start()
 
-    # PHONE_NUMBER definido no ambiente: enfileira para que o handler de QR
-    # peça o código assim que a conexão estiver pronta (sem race de timing).
-    number = _normalize_number(number)
-    if number:
-        try:
-            already = client.is_logged_in
-        except Exception:
-            already = False
-        if not already:
-            _pending_number[0] = number
-            print(f"📲 PHONE_NUMBER definido — pedirei o código para +{number} assim que conectar.")
-
     t.join()
 
 
@@ -2880,7 +2911,7 @@ def main():
 
     # método de login: código, QR (terminal) ou web (página com QR + código)
     method = os.getenv("LOGIN_METHOD", "").strip().lower()
-    number = os.getenv("PHONE_NUMBER", "").strip()
+    number = config.PHONE_NUMBER
 
     # sem terminal interativo (Render, VPS headless etc.) → força o método web
     if not method and not sys.stdin.isatty():
