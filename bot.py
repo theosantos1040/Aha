@@ -42,6 +42,7 @@ from ai import (
     chat as ai_chat,
     generate_image as ai_generate_image,
     search as ai_search,
+    transcribe as ai_transcribe,
     vision as ai_vision,
 )
 
@@ -66,6 +67,11 @@ _last_deleted = {}
 
 LINK_RE = re.compile(
     r"(https?://|www\.|chat\.whatsapp\.com/|t\.me/|wa\.me/|discord\.gg/)", re.IGNORECASE
+)
+PROFANITY_RE = re.compile(
+    r"\b(?:caralh\w*|porr\w*|merd\w*|fdp|puta\w*|vai\s+se\s+foder|"
+    r"bucet\w*|cuzao|cuzão|arromb\w*)\b",
+    re.IGNORECASE,
 )
 
 
@@ -109,11 +115,15 @@ _MEDIA_MAP = {
     "image": ("imageMessage", MediaType.MediaImage, MediaTypeToMMS.MediaImage),
     "video": ("videoMessage", MediaType.MediaVideo, MediaTypeToMMS.MediaVideo),
     "audio": ("audioMessage", MediaType.MediaAudio, MediaTypeToMMS.MediaAudio),
+    # Figurinhas usam o mesmo pipeline criptográfico de imagens no WhatsApp.
+    "sticker": ("stickerMessage", MediaType.MediaImage, MediaTypeToMMS.MediaImage),
 }
 
 
 def _media_kind(inner) -> str:
     """Descobre o tipo de mídia presente numa Message interna (waE2E)."""
+    if inner.stickerMessage.mediaKey:
+        return "sticker"
     if inner.videoMessage.mediaKey:
         return "video"
     if inner.imageMessage.mediaKey:
@@ -155,6 +165,23 @@ def get_media(message):
     if qkind:
         return _download_sub(quoted, qkind), qkind
     return None, ""
+
+
+def get_quoted_text(message) -> str:
+    """Texto da mensagem citada, usado pelos comandos de IA."""
+    try:
+        quoted = message.Message.extendedTextMessage.contextInfo.quotedMessage
+    except Exception:
+        return ""
+    for value in (
+        quoted.conversation,
+        quoted.extendedTextMessage.text,
+        quoted.imageMessage.caption,
+        quoted.videoMessage.caption,
+    ):
+        if value:
+            return value.strip()
+    return ""
 
 
 def short_jid(jid_str: str) -> str:
@@ -947,6 +974,24 @@ def cmd_help(ctx):
         f"   {p}tower {p}fishing {p}mining {p}hunt {p}petbattle {p}dragonhunt\n"
         f"   {p}farm {p}race {p}parkour {p}coinwar {p}poker {p}mafia {p}detective\n"
         f"   {p}spy {p}infected {p}zombie {p}kingdom {p}hotpotato\n\n"
+        f"🆕 *v4 — Mídia e IA*\n"
+        f"└─ {p}toimg {p}togif {p}fgpack {p}girar {p}espelhar {p}pb {p}blur\n"
+        f"   {p}pixelar {p}recortar {p}acelerar {p}lentidao {p}reverter\n"
+        f"   {p}resumir {p}corrigir {p}explicar {p}codigo {p}transcrever\n"
+        f"   {p}legenda {p}ocr {p}sentimento {p}ideias {p}historia {p}debater\n\n"
+        f"🆕 *v4 — Moderação e utilidades*\n"
+        f"└─ {p}promover {p}rebaixar {p}marcartodos {p}hidetag {p}delwarn\n"
+        f"   {p}listamutados {p}listabanidos {p}antipalavrao {p}blacklist\n"
+        f"   {p}antifake {p}antimidia {p}inativos {p}lembretes {p}cancelarlembrete\n"
+        f"   {p}cep {p}ddd {p}moeda {p}wiki {p}dicionario {p}imc {p}idade\n"
+        f"   {p}regra3 {p}base64 {p}hash {p}horario\n\n"
+        f"🆕 *v4 — Economia, social e jogos*\n"
+        f"└─ {p}perfil {p}loja {p}comprar {p}inventario {p}trabalhar {p}roubar\n"
+        f"   {p}apostar {p}banco {p}depositar {p}sacar {p}casar {p}abraco\n"
+        f"   {p}tapa {p}elogiar {p}sorteio {p}casal {p}piada {p}charada\n"
+        f"   {p}conselho {p}travalingua {p}top {p}anagrama {p}cacapalavras\n"
+        f"   {p}emojiquiz {p}enigma {p}bingo {p}soletrar {p}sequencia\n"
+        f"   {p}campominado {p}desafio\n\n"
         f"✨ *Destaques:*\n"
         f"• {p}IA [chatgpt|nex|glm|gemini] <pergunta> — converse com a IA 🤖\n"
         f"• {p}aimodel / {p}iamode / {p}thinking — personalize a IA do grupo\n"
@@ -1027,7 +1072,13 @@ def cmd_fg(ctx):
             webp = media.image_to_sticker(data)
         else:
             webp = media.video_to_sticker(data)
-        client.send_sticker(ctx.chat, webp, passthrough=True)
+        pack_name, author = db.resolve_sticker_pack(
+            ctx.sender_str, ctx.chat_str, config.BOT_NAME, config.BOT_NAME
+        )
+        client.send_sticker(
+            ctx.chat, webp, passthrough=True,
+            packname=pack_name, name=author,
+        )
     except media.MediaError as exc:
         ctx.reply(f"❌ {exc}")
     except Exception as exc:
@@ -2051,6 +2102,912 @@ def cmd_guesssong(ctx):
               "Por enquanto tente /trivia ou /guessanime 😉")
 
 
+# ===================== v4: MÍDIA E FIGURINHAS (12) =====================
+def _ctx_media(ctx, allowed, usage):
+    try:
+        data, kind = get_media(ctx.msg)
+    except Exception as exc:
+        ctx.reply(f"❌ Não consegui baixar a mídia: {exc}")
+        return None, ""
+    if not data or kind not in allowed:
+        ctx.reply(usage)
+        return None, ""
+    return data, kind
+
+
+def _send_processed(ctx, payload, kind, caption=""):
+    if kind == "image":
+        client.send_image(ctx.chat, payload, caption=caption or None)
+    elif kind == "video":
+        client.send_video(ctx.chat, payload, caption=caption or None)
+    else:
+        client.send_audio(ctx.chat, payload, ptt=False)
+
+
+def cmd_toimg(ctx):
+    data, kind = _ctx_media(
+        ctx, {"sticker"},
+        "Uso: responda a uma *figurinha estática* com /toimg.",
+    )
+    if not data:
+        return
+    try:
+        client.send_image(ctx.chat, media.sticker_to_image(data, kind), caption="🖼️ Figurinha convertida em foto.")
+    except media.MediaError as exc:
+        ctx.reply(f"❌ {exc}")
+
+
+def cmd_togif(ctx):
+    data, kind = _ctx_media(
+        ctx, {"sticker"},
+        "Uso: responda a uma *figurinha animada* com /togif.",
+    )
+    if not data:
+        return
+    try:
+        client.send_video(ctx.chat, media.animated_sticker_to_video(data, kind), caption="🎞️ Figurinha animada convertida em vídeo.")
+    except media.MediaError as exc:
+        ctx.reply(f"❌ {exc}")
+
+
+def cmd_fgpack(ctx):
+    if "|" not in ctx.args:
+        return ctx.reply("Uso: /fgpack Nome do pacote | Autor")
+    name, author = (part.strip() for part in ctx.args.split("|", 1))
+    if not name or not author or len(name) > 60 or len(author) > 60:
+        return ctx.reply("❌ Nome e autor são obrigatórios e devem ter até 60 caracteres.")
+    db.set_sticker_pack(ctx.sender_str, name, author, scope="user")
+    ctx.reply(f"✅ Pacote definido:\n📦 {name}\n✍️ {author}")
+
+
+def _image_operation(ctx, operation, *args):
+    data, kind = _ctx_media(
+        ctx, {"image", "sticker"},
+        f"Uso: envie ou responda a uma imagem/figurinha com /{ctx.command}.",
+    )
+    if not data:
+        return
+    try:
+        result = operation(data, kind, *args)
+        client.send_image(ctx.chat, result, caption=f"✅ /{ctx.command} concluído.")
+    except media.MediaError as exc:
+        ctx.reply(f"❌ {exc}")
+
+
+def cmd_girar(ctx):
+    try:
+        degrees = float(ctx.parts[0]) if ctx.parts else 90
+    except ValueError:
+        return ctx.reply("Uso: /girar [graus] (padrão: 90)")
+    _image_operation(ctx, media.rotate_image, degrees)
+
+
+def cmd_espelhar(ctx):
+    _image_operation(ctx, media.mirror_image)
+
+
+def cmd_pb(ctx):
+    _image_operation(ctx, media.grayscale_image)
+
+
+def cmd_blur(ctx):
+    try:
+        radius = float(ctx.parts[0]) if ctx.parts else 5
+    except ValueError:
+        return ctx.reply("Uso: /blur [intensidade de 0 a 100]")
+    _image_operation(ctx, media.blur_image, radius)
+
+
+def cmd_pixelar(ctx):
+    try:
+        size = int(ctx.parts[0]) if ctx.parts else 12
+    except ValueError:
+        return ctx.reply("Uso: /pixelar [tamanho de 2 a 256]")
+    _image_operation(ctx, media.pixelate_image, size)
+
+
+def cmd_recortar(ctx):
+    _image_operation(ctx, media.crop_square_image)
+
+
+def _speed_operation(ctx, operation, default_factor):
+    data, kind = _ctx_media(
+        ctx, {"audio", "video"},
+        f"Uso: envie ou responda a áudio/vídeo com /{ctx.command} [fator].",
+    )
+    if not data:
+        return
+    try:
+        factor = float(ctx.parts[0]) if ctx.parts else default_factor
+        result = operation(data, kind, factor)
+        _send_processed(ctx, result, kind, f"✅ /{ctx.command} {factor:g}x concluído.")
+    except (ValueError, media.MediaError) as exc:
+        ctx.reply(f"❌ {exc}")
+
+
+def cmd_acelerar(ctx):
+    _speed_operation(ctx, media.speed_up_media, 2)
+
+
+def cmd_lentidao(ctx):
+    _speed_operation(ctx, media.slow_down_media, 2)
+
+
+def cmd_reverter(ctx):
+    data, kind = _ctx_media(
+        ctx, {"audio", "video"},
+        "Uso: envie ou responda a áudio/vídeo com /reverter.",
+    )
+    if not data:
+        return
+    try:
+        _send_processed(ctx, media.reverse_media(data, kind), kind, "⏪ Mídia revertida.")
+    except media.MediaError as exc:
+        ctx.reply(f"❌ {exc}")
+
+
+# ===================== v4: IA (11) =====================
+def _ai_source(ctx, usage):
+    source = ctx.args.strip() or get_quoted_text(ctx.msg)
+    if not source:
+        ctx.reply(usage)
+        return ""
+    return source
+
+
+def _ai_instruction(ctx, instruction, usage):
+    source = _ai_source(ctx, usage)
+    if not source:
+        return
+    try:
+        client.send_chat_presence(ctx.chat, 0, 0)
+    except Exception:
+        pass
+    try:
+        answer = ai_chat(f"{instruction}\n\nCONTEÚDO:\n{source}")
+        ctx.reply(answer)
+    except AIError as exc:
+        ctx.reply(f"❌ IA indisponível: {exc}")
+
+
+def cmd_resumir(ctx):
+    _ai_instruction(ctx, "Resuma em português, preservando os fatos principais e sem inventar informações.",
+                    "Uso: /resumir <texto> ou responda a uma mensagem com /resumir")
+
+
+def cmd_corrigir(ctx):
+    _ai_instruction(ctx, "Corrija ortografia e gramática. Responda apenas com o texto corrigido.",
+                    "Uso: /corrigir <texto> ou responda a uma mensagem")
+
+
+def cmd_explicar(ctx):
+    _ai_instruction(ctx, "Explique em linguagem muito simples, como para uma criança de 5 anos.",
+                    "Uso: /explicar <assunto ou texto>")
+
+
+def cmd_codigo(ctx):
+    _ai_instruction(ctx, "Gere ou explique o código solicitado. Use blocos de código e mencione cuidados importantes.",
+                    "Uso: /codigo <pedido ou código>")
+
+
+def cmd_transcrever(ctx):
+    data, kind = _ctx_media(
+        ctx, {"audio"},
+        "Uso: envie um áudio com a legenda /transcrever ou responda a um áudio.",
+    )
+    if not data:
+        return
+    try:
+        ctx.reply("🎙️ Transcrevendo áudio...")
+        ctx.reply(f"📝 *Transcrição*\n{ai_transcribe(data, language='pt')}")
+    except AIError as exc:
+        ctx.reply(f"❌ {exc}")
+
+
+def _vision_instruction(ctx, prompt, title):
+    data, kind = _ctx_media(
+        ctx, {"image", "sticker"},
+        f"Uso: envie ou responda a uma foto com /{ctx.command}.",
+    )
+    if not data:
+        return
+    try:
+        ctx.reply(f"{title} Processando imagem...")
+        ctx.reply(ai_vision(prompt, data))
+    except AIError as exc:
+        ctx.reply(f"❌ IA de visão indisponível: {exc}")
+
+
+def cmd_legenda(ctx):
+    extra = f" Contexto dado pelo usuário: {ctx.args}" if ctx.args else ""
+    _vision_instruction(ctx, "Crie uma legenda curta, criativa e apropriada em português para esta imagem." + extra, "✍️")
+
+
+def cmd_ocr(ctx):
+    _vision_instruction(ctx, "Extraia todo o texto visível desta imagem. Preserve linhas e responda apenas com o texto; se não houver, diga isso.", "🔎")
+
+
+def cmd_sentimento(ctx):
+    _ai_instruction(ctx, "Analise o tom e o sentimento. Seja objetivo e aponte sinais no texto.",
+                    "Uso: /sentimento <texto> ou responda a uma mensagem")
+
+
+def cmd_ideias(ctx):
+    _ai_instruction(ctx, "Faça um brainstorm variado com pelo menos 10 ideias práticas e concisas.",
+                    "Uso: /ideias <tema>")
+
+
+def cmd_historia(ctx):
+    _ai_instruction(ctx, "Crie uma história original, coerente e apropriada para todas as idades.",
+                    "Uso: /historia <tema>")
+
+
+def cmd_debater(ctx):
+    _ai_instruction(ctx, "Apresente de forma equilibrada os melhores argumentos a favor e contra, e conclua sem falsa certeza.",
+                    "Uso: /debater <tema>")
+
+
+# ===================== v4: MODERAÇÃO (12) =====================
+def _participant_change(ctx, action, label):
+    if not ctx.require_admin():
+        return
+    target = ctx.target_jid_str()
+    if not target:
+        return ctx.reply(f"Uso: /{ctx.command} @usuario")
+    try:
+        client.update_group_participants(ctx.chat, [parse_jid(target)], action)
+        audit(ctx.chat, ctx.chat_str, ctx.sender_str, ctx.command, short_jid(target))
+        ctx.reply(f"✅ @{short_jid(target)} foi {label}.")
+    except Exception as exc:
+        ctx.reply(f"❌ Não consegui alterar o admin. Confirme se o bot é admin: {exc}")
+
+
+def cmd_promover(ctx):
+    _participant_change(ctx, ParticipantChange.PROMOTE, "promovido(a) a admin")
+
+
+def cmd_rebaixar(ctx):
+    _participant_change(ctx, ParticipantChange.DEMOTE, "rebaixado(a) de admin")
+
+
+def _tag_everyone(ctx, hidden=False):
+    """Menciona todos os membros do grupo.
+
+    send_message NÃO tem parâmetro `mentions=` — quem descobre as menções é o
+    próprio neonize, varrendo `@<dígitos>` no texto (ou em `ghost_mentions`,
+    que tem precedência) para preencher o contextInfo.
+      * /marcartodos: os @ ficam no texto, todo mundo vê quem foi marcado.
+      * /hidetag: o texto fica limpo e os @ vão só em ghost_mentions, então
+        todos recebem a notificação sem virar uma parede de números.
+    """
+    if not ctx.require_admin():
+        return
+    phones = _group_phones(ctx)
+    if not phones:
+        return ctx.reply("❌ Não consegui obter os membros do grupo.")
+    text = ctx.args.strip() or "Atenção, pessoal!"
+    marcacoes = " ".join(f"@{p}" for p in phones)
+    try:
+        if hidden:
+            client.send_message(ctx.chat, f"📢 {text}", ghost_mentions=marcacoes)
+        else:
+            client.send_message(ctx.chat, f"📢 {text}\n{marcacoes}")
+    except Exception as exc:
+        ctx.reply(f"❌ Falha ao mencionar o grupo: {exc}")
+
+
+def cmd_marcartodos(ctx):
+    _tag_everyone(ctx, hidden=False)
+
+
+def cmd_hidetag(ctx):
+    _tag_everyone(ctx, hidden=True)
+
+
+def cmd_delwarn(ctx):
+    if not ctx.require_admin():
+        return
+    target = ctx.target_jid_str()
+    if not target:
+        return ctx.reply("Uso: /delwarn @usuario [id]")
+    ids = [int(p) for p in ctx.parts if p.isdigit() and len(p) < 8]
+    removed = db.delete_warn(ctx.chat_str, short_jid(target), ids[-1] if ids else None)
+    ctx.reply("✅ Advertência removida." if removed else "❌ Advertência não encontrada.")
+
+
+def _show_jid_list(ctx, title, rows):
+    if not ctx.require_admin():
+        return
+    if not rows:
+        return ctx.reply(f"{title}\n_nenhum usuário_"
+        )
+    ctx.reply(title + "\n" + "\n".join(f"• @{short_jid(row)}" for row in rows[:100]))
+
+
+def cmd_listamutados(ctx):
+    _show_jid_list(ctx, "🔇 *Usuários silenciados*", db.list_muted(ctx.chat_str))
+
+
+def cmd_listabanidos(ctx):
+    _show_jid_list(ctx, "🚫 *Usuários banidos*", db.list_banned(ctx.chat_str))
+
+
+def cmd_antipalavrao(ctx):
+    _toggle(ctx, "antipalavrao", "Filtro de palavrões", "🤐")
+
+
+def cmd_blacklist(ctx):
+    if not ctx.require_admin():
+        return
+    action = ctx.parts[0].casefold() if ctx.parts else "list"
+    value = ctx.args.split(maxsplit=1)[1].strip() if len(ctx.parts) > 1 else ""
+    if action in ("add", "adicionar") and value:
+        added = db.blacklist_add(ctx.chat_str, value, ctx.sender_str)
+        return ctx.reply("✅ Expressão adicionada à blacklist." if added else "ℹ️ Expressão já estava na blacklist.")
+    if action in ("del", "remove", "remover") and value:
+        removed = db.blacklist_remove(ctx.chat_str, value)
+        return ctx.reply("✅ Expressão removida." if removed else "❌ Expressão não encontrada.")
+    if action in ("list", "lista"):
+        words = db.blacklist_list(ctx.chat_str)
+        return ctx.reply("🚫 *Blacklist*\n" + ("\n".join(f"• {w}" for w in words) if words else "_vazia_"))
+    ctx.reply("Uso: /blacklist add|remove <expressão> ou /blacklist list")
+
+
+def cmd_antifake(ctx):
+    if not ctx.require_admin():
+        return
+    action = ctx.parts[0].casefold() if ctx.parts else ""
+    if action in ("on", "ativar", "ligar"):
+        ddi = "".join(c for c in (ctx.parts[1] if len(ctx.parts) > 1 else "55") if c.isdigit())
+        if not 1 <= len(ddi) <= 3:
+            return ctx.reply("Uso: /antifake on [DDI permitido] (ex.: /antifake on 55)")
+        db.set_setting(ctx.chat_str, "antifake", "1")
+        db.set_setting(ctx.chat_str, "antifake_ddi", ddi)
+        return ctx.reply(f"🛂 Antifake ativado. Somente DDI +{ddi} poderá entrar.")
+    if action in ("off", "desativar", "desligar"):
+        db.set_setting(ctx.chat_str, "antifake", "0")
+        return ctx.reply("🛂 Antifake desativado.")
+    status = db.get_setting(ctx.chat_str, "antifake") == "1"
+    ctx.reply(f"Uso: /antifake on [DDI] | off\nStatus: {'ativado' if status else 'desativado'}")
+
+
+def cmd_antimidia(ctx):
+    if not ctx.require_admin():
+        return
+    aliases = {
+        "foto": "image", "imagem": "image", "image": "image",
+        "video": "video", "vídeo": "video", "audio": "audio", "áudio": "audio",
+        "figurinha": "sticker", "sticker": "sticker",
+    }
+    action = ctx.parts[0].casefold() if ctx.parts else ""
+    if action in ("off", "desativar", "desligar"):
+        db.set_setting(ctx.chat_str, "antimidia", "")
+        return ctx.reply("🖼️ Antimídia desativado.")
+    if action in ("on", "todos", "tudo"):
+        blocked = {"image", "video", "audio", "sticker"}
+    else:
+        blocked = {aliases[p.casefold()] for p in ctx.parts if p.casefold() in aliases}
+    if blocked:
+        db.set_setting(ctx.chat_str, "antimidia", ",".join(sorted(blocked)))
+        return ctx.reply("🚷 Antimídia bloqueando: " + ", ".join(sorted(blocked)))
+    current = db.get_setting(ctx.chat_str, "antimidia", "")
+    ctx.reply("Uso: /antimidia on|off ou /antimidia foto video audio figurinha\nAtual: " + (current or "desativado"))
+
+
+def cmd_inativos(ctx):
+    if not ctx.require_admin():
+        return
+    try:
+        days = int(ctx.parts[0]) if ctx.parts else 30
+    except ValueError:
+        return ctx.reply("Uso: /inativos [dias]")
+    if not 1 <= days <= 3650:
+        return ctx.reply("❌ Informe entre 1 e 3650 dias.")
+    cutoff = int(time.time()) - days * 86400
+    phones = _group_phones(ctx)
+    if not phones:
+        return ctx.reply("❌ Não consegui obter os membros do grupo. Tente de novo.")
+    inactive = []
+    for phone in phones:
+        seen = db.get_last_activity(ctx.chat_str, phone)
+        if seen is None or seen < cutoff:
+            label = "sem registro" if seen is None else time.strftime("%d/%m/%Y", time.localtime(seen))
+            inactive.append((phone, label))
+    if not inactive:
+        return ctx.reply(f"✅ Todos falaram nos últimos {days} dias.")
+    lines = [f"💤 *Inativos há {days}+ dias* ({len(inactive)})"]
+    lines.extend(f"• @{phone} — {last}" for phone, last in inactive[:100])
+    ctx.reply("\n".join(lines))
+
+
+# ===================== v4: UTILIDADES (13) =====================
+def cmd_lembretes(ctx):
+    rows = db.list_reminders(ctx.sender_str, ctx.chat_str)
+    if not rows:
+        return ctx.reply("⏰ Você não tem lembretes ativos neste chat.")
+    lines = ["⏰ *Seus lembretes ativos*"]
+    for row in rows[:30]:
+        when = time.strftime("%d/%m/%Y %H:%M", time.localtime(row["due"]))
+        lines.append(f"#{row['id']} — {when} — {row['text']}")
+    ctx.reply("\n".join(lines))
+
+
+def cmd_cancelarlembrete(ctx):
+    if not ctx.parts or not ctx.parts[0].isdigit():
+        return ctx.reply("Uso: /cancelarlembrete <id> (consulte /lembretes)")
+    ok = db.cancel_reminder(int(ctx.parts[0]), ctx.sender_str, ctx.chat_str)
+    ctx.reply("✅ Lembrete cancelado." if ok else "❌ Lembrete ativo não encontrado ou não pertence a você.")
+
+
+def cmd_cep(ctx):
+    ctx.reply(services.cep(ctx.args))
+
+
+def cmd_ddd(ctx):
+    ctx.reply(services.ddd(ctx.args))
+
+
+def cmd_moeda(ctx):
+    ctx.reply(services.moeda(ctx.args))
+
+
+def cmd_wiki(ctx):
+    ctx.reply(services.wiki(ctx.args))
+
+
+def cmd_dicionario(ctx):
+    ctx.reply(services.dicionario(ctx.args))
+
+
+def cmd_imc(ctx):
+    if len(ctx.parts) != 2:
+        return ctx.reply("Uso: /imc <peso_kg> <altura_m> (ex.: /imc 70 1.75)")
+    try:
+        weight = float(ctx.parts[0].replace(",", "."))
+        height = float(ctx.parts[1].replace(",", "."))
+        if not 20 <= weight <= 500 or not 0.8 <= height <= 2.8:
+            raise ValueError
+    except ValueError:
+        return ctx.reply("❌ Peso ou altura inválidos.")
+    value = weight / (height * height)
+    category = "baixo peso" if value < 18.5 else "peso adequado" if value < 25 else "sobrepeso" if value < 30 else "obesidade"
+    ctx.reply(f"⚖️ IMC: *{value:.1f}* — {category}.\n_Este cálculo é apenas informativo._")
+
+
+def cmd_idade(ctx):
+    from datetime import date, datetime
+    raw = ctx.args.strip()
+    born = None
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d"):
+        try:
+            born = datetime.strptime(raw, fmt).date()
+            break
+        except ValueError:
+            pass
+    today = date.today()
+    if born is None or born > today or born.year < 1900:
+        return ctx.reply("Uso: /idade DD/MM/AAAA")
+    age = today.year - born.year - ((today.month, today.day) < (born.month, born.day))
+    ctx.reply(f"🎂 Idade: *{age} anos*.")
+
+
+def cmd_regra3(ctx):
+    if len(ctx.parts) != 3:
+        return ctx.reply("Uso: /regra3 <a> <b> <c>  (a está para b assim como c está para x)")
+    try:
+        a, b, c = (float(p.replace(",", ".")) for p in ctx.parts)
+        if a == 0:
+            raise ValueError
+    except ValueError:
+        return ctx.reply("❌ Use três números e mantenha o primeiro diferente de zero.")
+    ctx.reply(f"📐 x = *{(b * c / a):.6g}*")
+
+
+def cmd_base64(ctx):
+    import base64 as b64
+    if len(ctx.parts) < 2:
+        return ctx.reply("Uso: /base64 encode <texto> | /base64 decode <base64>")
+    action, value = ctx.parts[0].casefold(), ctx.args.split(maxsplit=1)[1]
+    if len(value) > 20000:
+        return ctx.reply("❌ Entrada longa demais.")
+    try:
+        if action in ("encode", "codificar"):
+            result = b64.b64encode(value.encode()).decode()
+        elif action in ("decode", "decodificar"):
+            result = b64.b64decode(value, validate=True).decode("utf-8")
+        else:
+            return ctx.reply("Ação inválida: use encode ou decode.")
+        ctx.reply(f"🔐 `{result}`")
+    except Exception:
+        ctx.reply("❌ Base64 inválido ou texto não UTF-8.")
+
+
+def cmd_hash(ctx):
+    import hashlib
+    if len(ctx.parts) < 2 or ctx.parts[0].casefold() not in ("md5", "sha256"):
+        return ctx.reply("Uso: /hash md5|sha256 <texto>")
+    algorithm = ctx.parts[0].casefold()
+    value = ctx.args.split(maxsplit=1)[1].encode()
+    digest = hashlib.new(algorithm, value).hexdigest()
+    ctx.reply(f"#️⃣ {algorithm.upper()}: `{digest}`")
+
+
+def cmd_horario(ctx):
+    ctx.reply(services.horario(ctx.args))
+
+
+# ===================== v4: ECONOMIA E RPG (11) =====================
+def cmd_perfil(ctx):
+    target = ctx.target_jid_str() or ctx.sender_str
+    xp = db.get_xp(target)
+    level, current, needed = db.level_from_xp(xp)
+    wallet, bank = db.get_wallet_and_bank(target)
+    roles = db.get_roles(ctx.chat_str, short_jid(target))
+    inventory = db.get_inventory(target)
+    items = sum(row["quantity"] for row in inventory)
+    ctx.reply(
+        f"👤 *Perfil de @{short_jid(target)}*\n"
+        f"⭐ Nível {level} — {current}/{needed} XP\n"
+        f"💰 Carteira: {wallet} | 🏦 Banco: {bank}\n"
+        f"🎖️ Cargos: {', '.join(roles) if roles else 'nenhum'}\n"
+        f"🎒 Itens: {items}"
+    )
+
+
+def cmd_loja(ctx):
+    items = db.shop_list()
+    lines = ["🛒 *Loja*"]
+    lines.extend(f"• `{row['item_id']}` — {row['name']} — {row['price']} moedas\n  {row['description']}" for row in items)
+    lines.append("\nCompre com /comprar <id> [quantidade]")
+    ctx.reply("\n".join(lines))
+
+
+def cmd_comprar(ctx):
+    if not ctx.parts:
+        return ctx.reply("Uso: /comprar <id> [quantidade]")
+    try:
+        quantity = int(ctx.parts[1]) if len(ctx.parts) > 1 else 1
+    except ValueError:
+        return ctx.reply("❌ Quantidade inválida.")
+    # quantidade negativa venderia o item de volta, creditando moedas
+    if quantity <= 0 or quantity > 1000:
+        return ctx.reply("❌ Quantidade deve ser entre 1 e 1000.")
+    ok, result = db.buy_item(ctx.sender_str, ctx.parts[0], quantity)
+    if not ok:
+        return ctx.reply(f"❌ {result}")
+    ctx.reply(
+        f"✅ Comprou {result['quantity']}x {result['name']} por {result['total']} moedas.\n"
+        f"Saldo: {result['balance']}"
+    )
+
+
+def cmd_inventario(ctx):
+    rows = db.get_inventory(ctx.sender_str)
+    if not rows:
+        return ctx.reply("🎒 Seu inventário está vazio.")
+    ctx.reply("🎒 *Inventário*\n" + "\n".join(
+        f"• {row['name'] or row['item_id']} x{row['quantity']}" for row in rows
+    ))
+
+
+def cmd_trabalhar(ctx):
+    reward = random.randint(80, 180)
+    ok, value = db.claim_work(ctx.sender_str, reward=reward, cooldown=3600)
+    if not ok:
+        return ctx.reply(f"⏳ Você já trabalhou. Volte em {utils.human_uptime(value)}.")
+    jobs = ["programou um site", "ajudou numa mudança", "fez entregas", "consertou um computador"]
+    ctx.reply(f"🧰 Você {random.choice(jobs)} e ganhou *{value} moedas*!\nSaldo: {db.get_balance(ctx.sender_str)}")
+
+
+def cmd_roubar(ctx):
+    target = ctx.target_jid_str()
+    if not target:
+        return ctx.reply("Uso: /roubar @usuario")
+    success = random.random() < 0.45
+    amount = random.randint(25, 120)
+    penalty = random.randint(15, 80)
+    ok, result = db.rob_user(ctx.sender_str, target, amount, success=success, penalty=penalty)
+    if not ok:
+        if isinstance(result, int):
+            return ctx.reply(f"⏳ Tente roubar novamente em {utils.human_uptime(result)}.")
+        return ctx.reply(f"❌ {result}")
+    if result["success"]:
+        ctx.reply(f"🥷 Você roubou *{result['amount']} moedas* de @{short_jid(target)}!")
+    else:
+        ctx.reply(f"🚓 Você foi pego e perdeu *{result['amount']} moedas*.")
+
+
+def cmd_apostar(ctx):
+    if not ctx.parts or not ctx.parts[0].isdigit():
+        return ctx.reply("Uso: /apostar <valor>")
+    amount = int(ctx.parts[0])
+    if amount <= 0:
+        return ctx.reply("❌ Aposte um valor maior que zero.")
+    won = random.random() < 0.48
+    ok, result = db.place_bet(ctx.sender_str, amount, won, multiplier=2)
+    if not ok:
+        return ctx.reply(f"❌ {result}")
+    if result["won"]:
+        ctx.reply(f"🎰 Você venceu! Prêmio: *{result['payout']} moedas*. Saldo: {result['balance']}")
+    else:
+        ctx.reply(f"🎰 Você perdeu {result['stake']} moedas. Saldo: {result['balance']}")
+
+
+def cmd_banco(ctx):
+    wallet, bank = db.get_wallet_and_bank(ctx.sender_str)
+    ctx.reply(f"🏦 *Banco*\nCarteira: {wallet} moedas\nGuardado: *{bank} moedas*")
+
+
+def _money_amount(ctx, available):
+    """Lê um valor em moedas do comando. Devolve None se for inválido.
+
+    Rejeita zero e negativos: sem isso, `/sacar -1000` inverteria o sentido da
+    transferência e viraria um depósito de dinheiro que o usuário não tem
+    (o mesmo valia para `/depositar -1000`).
+    """
+    if not ctx.parts:
+        return None
+    if ctx.parts[0].casefold() in ("tudo", "all"):
+        return available if available > 0 else None
+    try:
+        valor = int(ctx.parts[0])
+    except ValueError:
+        return None
+    return valor if valor > 0 else None
+
+
+def cmd_depositar(ctx):
+    wallet, _ = db.get_wallet_and_bank(ctx.sender_str)
+    amount = _money_amount(ctx, wallet)
+    if amount is None:
+        return ctx.reply("Uso: /depositar <valor|tudo>")
+    ok, result = db.deposit(ctx.sender_str, amount)
+    ctx.reply(
+        f"✅ Depósito feito. Carteira: {result['balance']} | Banco: {result['bank']}"
+        if ok else f"❌ {result}"
+    )
+
+
+def cmd_sacar(ctx):
+    _, bank = db.get_wallet_and_bank(ctx.sender_str)
+    amount = _money_amount(ctx, bank)
+    if amount is None:
+        return ctx.reply("Uso: /sacar <valor|tudo>")
+    ok, result = db.withdraw(ctx.sender_str, amount)
+    ctx.reply(
+        f"✅ Saque feito. Carteira: {result['balance']} | Banco: {result['bank']}"
+        if ok else f"❌ {result}"
+    )
+
+
+def cmd_casar(ctx):
+    action = ctx.parts[0].casefold() if ctx.parts else "status"
+    if action in ("aceitar", "sim"):
+        ok, result = db.accept_marriage(ctx.chat_str, ctx.sender_str)
+        if not ok:
+            return ctx.reply(f"❌ {result}")
+        return ctx.reply(f"💍 Casamento confirmado entre @{short_jid(result['jid1'])} e @{short_jid(result['jid2'])}!")
+    if action in ("recusar", "nao", "não"):
+        return ctx.reply("💔 Pedido recusado." if db.decline_marriage(ctx.chat_str, ctx.sender_str) else "❌ Pedido não encontrado.")
+    if action in ("divorciar", "divorcio", "divórcio"):
+        return ctx.reply("💔 Divórcio concluído." if db.divorce(ctx.chat_str, ctx.sender_str) else "❌ Você não está casado(a).")
+    target = ctx.target_jid_str()
+    if target:
+        ok, result = db.propose_marriage(ctx.chat_str, ctx.sender_str, target)
+        return ctx.reply(
+            f"💍 @{short_jid(target)}, @{short_jid(ctx.sender_str)} pediu você em casamento! Responda /casar aceitar."
+            if ok else f"❌ {result}"
+        )
+    row = db.get_marriage(ctx.chat_str, ctx.sender_str, include_pending=True)
+    if not row:
+        return ctx.reply("💍 Você está solteiro(a). Use /casar @usuario.")
+    other = row["jid2"] if row["jid1"] == ctx.sender_str else row["jid1"]
+    ctx.reply(f"💍 Status: {row['status']} com @{short_jid(other)}")
+
+
+# ===================== v4: DIVERSÃO E SOCIAL (10) =====================
+def _social_target(ctx, kind):
+    target = ctx.target_jid_str()
+    if not target:
+        return ctx.reply(f"Uso: /{ctx.command} @usuario")
+    actor = "@" + short_jid(ctx.sender_str)
+    target_label = "@" + short_jid(target)
+    ctx.reply(games.social_interaction(kind, actor, target_label, seed=str(time.time_ns())))
+
+
+def cmd_abraco(ctx):
+    _social_target(ctx, "abraco")
+
+
+def cmd_tapa(ctx):
+    _social_target(ctx, "tapa")
+
+
+def cmd_elogiar(ctx):
+    _social_target(ctx, "elogio")
+
+
+def cmd_sorteio(ctx):
+    if "|" in ctx.args:
+        choices = [item.strip() for item in ctx.args.split("|") if item.strip()]
+    elif ctx.parts:
+        # o que o usuário digitou tem prioridade sobre sortear um membro:
+        # antes, "/sorteio pizza sushi" num grupo ignorava as opções
+        choices = ctx.parts
+    elif ctx.is_group:
+        choices = ["@" + phone for phone in _group_phones(ctx)]
+    else:
+        choices = []
+    if len(choices) < 2:
+        return ctx.reply("Uso: /sorteio opção 1 | opção 2 | opção 3 (ou use no grupo)")
+    ctx.reply(f"🎉 Sorteado: *{random.choice(choices)}*")
+
+
+def cmd_casal(ctx):
+    if not ctx.is_group:
+        return ctx.reply("❌ Esse comando só funciona em grupos.")
+    try:
+        a, b = games.couple_of_day(_group_phones(ctx))
+        ctx.reply(f"💞 *Casal do dia*\n@{a} + @{b}")
+    except ValueError as exc:
+        ctx.reply(f"❌ {exc}")
+
+
+def cmd_piada(ctx):
+    ctx.reply(f"😂 {games.joke()}")
+
+
+def cmd_charada(ctx):
+    item = games.new_riddle()
+    ctx.reply(f"🧩 *Charada*\n{item['q']}\n\n💡 Resposta: ||{item['a']}||")
+
+
+def cmd_conselho(ctx):
+    ctx.reply(f"💡 {games.advice()}")
+
+
+def cmd_travalingua(ctx):
+    ctx.reply(f"👅 {games.tongue_twister()}")
+
+
+def cmd_top(ctx):
+    if not ctx.is_group:
+        return ctx.reply("❌ Esse comando só funciona em grupos.")
+    criterion = ctx.parts[0].casefold() if ctx.parts else "xp"
+    members = _group_phones(ctx)
+    if criterion in ("moedas", "saldo", "rico"):
+        entries = db.scores_for_phones(members, "moedas")
+        unit = "moedas"
+    else:
+        entries = db.scores_for_phones(members, "xp")
+        unit = "XP"
+    lines = [f"🏆 *Top 5 — {criterion}*"]
+    lines.extend(f"{i}. @{phone} — {score:g} {unit}" for i, (phone, score) in enumerate(games.top_members(entries), 1))
+    ctx.reply("\n".join(lines))
+
+
+# ===================== v4: JOGOS (9) =====================
+def cmd_anagrama(ctx):
+    state = _active_games.get(ctx.chat_str)
+    if state and state.get("type") == "anagrama" and ctx.args:
+        if games.check_anagram(ctx.args, state["word"]):
+            db.add_balance(ctx.sender_str, 40)
+            _active_games.pop(ctx.chat_str, None)
+            return ctx.reply("✅ Acertou! +40 moedas.")
+        return ctx.reply(f"❌ Ainda não. Dica: {state['hint']}")
+    item = games.new_anagram()
+    _active_games[ctx.chat_str] = {"type": "anagrama", **item}
+    ctx.reply(f"🔀 *Anagrama:* `{item['scrambled']}`\nDica: {item['hint']}\nResponda /anagrama <palavra>")
+
+
+def cmd_cacapalavras(ctx):
+    puzzle = games.new_word_search()
+    ctx.reply("🔎 *Caça-palavras*\n```\n" + games.render_word_search(puzzle) + "\n```\nPalavras: " + ", ".join(puzzle["words"]))
+
+
+def cmd_emojiquiz(ctx):
+    state = _active_games.get(ctx.chat_str)
+    if state and state.get("type") == "emojiquiz" and ctx.args:
+        if games.check_emoji_quiz(ctx.args, state["answer"]):
+            db.add_balance(ctx.sender_str, 40)
+            _active_games.pop(ctx.chat_str, None)
+            return ctx.reply("🎬 Acertou o filme! +40 moedas.")
+        return ctx.reply(f"❌ Errado. Dica: {state['hint']}")
+    item = games.new_emoji_quiz()
+    _active_games[ctx.chat_str] = {"type": "emojiquiz", "answer": item["a"], "hint": item["hint"]}
+    ctx.reply(f"🎬 *Qual é o filme?* {item['q']}\nResponda /emojiquiz <filme>")
+
+
+def cmd_enigma(ctx):
+    state = _active_games.get(ctx.chat_str)
+    if state and state.get("type") == "enigma" and ctx.args:
+        expected = re.sub(r"\W", "", state["answer"].casefold())
+        answer = re.sub(r"\W", "", ctx.args.casefold())
+        _active_games.pop(ctx.chat_str, None)
+        if answer == expected:
+            db.add_balance(ctx.sender_str, 50)
+            return ctx.reply("🧠 Resposta correta! +50 moedas.")
+        return ctx.reply(f"❌ A resposta era: {state['answer']}")
+    item = games.new_logic_puzzle()
+    _active_games[ctx.chat_str] = {"type": "enigma", "answer": item["a"]}
+    ctx.reply(f"🧠 *Enigma*\n{item['q']}\nResponda /enigma <resposta>")
+
+
+def cmd_bingo(ctx):
+    ctx.reply("🎱 *Sua cartela de bingo*\n```\n" + games.render_bingo_card(games.new_bingo_card()) + "\n```")
+
+
+def cmd_soletrar(ctx):
+    state = _active_games.get(ctx.chat_str)
+    if state and state.get("type") == "soletrar" and ctx.args:
+        if games.check_spelling(ctx.args, state["word"]):
+            db.add_balance(ctx.sender_str, 30)
+            _active_games.pop(ctx.chat_str, None)
+            return ctx.reply("🔤 Correto! +30 moedas.")
+        return ctx.reply("❌ Grafia incorreta. Tente de novo.")
+    item = games.new_spelling()
+    _active_games[ctx.chat_str] = {"type": "soletrar", "word": item["word"]}
+    ctx.reply(f"🔤 *Soletre a palavra desta dica:* {item['hint']}\nResponda /soletrar <palavra>")
+
+
+def cmd_sequencia(ctx):
+    state = _active_games.get(ctx.chat_str)
+    if state and state.get("type") == "sequencia" and ctx.args:
+        if games.check_sequence(ctx.args, state["sequence"]):
+            db.add_balance(ctx.sender_str, 35)
+            _active_games.pop(ctx.chat_str, None)
+            return ctx.reply("🧠 Sequência correta! +35 moedas.")
+        _active_games.pop(ctx.chat_str, None)
+        return ctx.reply("❌ Sequência incorreta.")
+    sequence = games.new_sequence(random.randint(1, 5))
+    _active_games[ctx.chat_str] = {"type": "sequencia", "sequence": sequence}
+    ctx.reply("🧠 Memorize: `" + " ".join(map(str, sequence)) + "`\nResponda /sequencia <números>")
+
+
+def cmd_campominado(ctx):
+    state = _active_games.get(ctx.chat_str)
+    if not state or state.get("type") != "campominado":
+        board = games.new_minesweeper()
+        state = {"type": "campominado", "board": board, "revealed": set()}
+        _active_games[ctx.chat_str] = state
+        return ctx.reply("💣 *Campo minado*\n" + games.render_minesweeper(board) + "\nJogue /campominado <linha> <coluna>")
+    if len(ctx.parts) != 2 or not all(p.isdigit() for p in ctx.parts):
+        return ctx.reply("Uso: /campominado <linha> <coluna>")
+    try:
+        result = games.minesweeper_reveal(
+            state["board"], int(ctx.parts[0]) - 1, int(ctx.parts[1]) - 1, state["revealed"]
+        )
+    except ValueError as exc:
+        return ctx.reply(f"❌ {exc}")
+    if not result.get("valid", True):
+        size = len(state["board"])
+        return ctx.reply(f"❌ Fora do tabuleiro. Use linha e coluna de 1 a {size}.")
+    state["revealed"] = result["revealed"]
+    if result["hit"]:
+        board = games.render_minesweeper(state["board"], state["revealed"], show_mines=True)
+        _active_games.pop(ctx.chat_str, None)
+        return ctx.reply("💥 Você pisou numa mina!\n" + board)
+    if result["won"]:
+        db.add_balance(ctx.sender_str, 100)
+        _active_games.pop(ctx.chat_str, None)
+        return ctx.reply("🏆 Você limpou o campo! +100 moedas.\n" + games.render_minesweeper(state["board"], state["revealed"]))
+    ctx.reply(games.render_minesweeper(state["board"], state["revealed"]) + "\nJogue novamente.")
+
+
+def cmd_desafio(ctx):
+    item = games.daily_challenge(ctx.sender_str)
+    if ctx.parts and ctx.parts[0].casefold() in ("concluir", "feito", "resgatar"):
+        ok, result = db.claim_daily_challenge(
+            ctx.sender_str, reward=item["reward"], challenge=item["challenge"], day=item["date"]
+        )
+        return ctx.reply(f"✅ Desafio concluído! +{result} moedas." if ok else f"❌ {result}")
+    row = db.get_daily_challenge(
+        ctx.sender_str, day=item["date"], challenge=item["challenge"], reward=item["reward"]
+    )
+    status = "✅ já resgatado" if row["claimed"] else "use /desafio concluir ao terminar"
+    ctx.reply(f"🎯 *Desafio diário*\n{row['challenge']}\nRecompensa: {row['reward']} moedas\n_{status}_")
+
+
 # ===================== ROTEADOR =====================
 COMMANDS = {
     "ttkvd": cmd_ttkvd, "ban": cmd_ban, "unban": cmd_unban, "kick": cmd_kick, "mute": cmd_mute,
@@ -2115,6 +3072,44 @@ COMMANDS = {
     "spy": cmd_spy, "infected": cmd_infected, "murdermystery": cmd_murdermystery,
     "zombie": cmd_zombie, "survivor": cmd_survivor, "kingdom": cmd_kingdom,
     "hotpotato": cmd_hotpotato, "guesslogo": cmd_guesslogo, "guesssong": cmd_guesssong,
+    # ----- v4: mídia e figurinhas (12) -----
+    "toimg": cmd_toimg, "togif": cmd_togif, "fgpack": cmd_fgpack,
+    "girar": cmd_girar, "espelhar": cmd_espelhar, "pb": cmd_pb,
+    "blur": cmd_blur, "pixelar": cmd_pixelar, "recortar": cmd_recortar,
+    "acelerar": cmd_acelerar, "lentidao": cmd_lentidao, "reverter": cmd_reverter,
+    # ----- v4: IA (11) -----
+    "resumir": cmd_resumir, "corrigir": cmd_corrigir, "explicar": cmd_explicar,
+    "codigo": cmd_codigo, "transcrever": cmd_transcrever, "legenda": cmd_legenda,
+    "ocr": cmd_ocr, "sentimento": cmd_sentimento, "ideias": cmd_ideias,
+    "historia": cmd_historia, "debater": cmd_debater,
+    # ----- v4: moderação (12) -----
+    "promover": cmd_promover, "rebaixar": cmd_rebaixar,
+    "marcartodos": cmd_marcartodos, "hidetag": cmd_hidetag,
+    "delwarn": cmd_delwarn, "listamutados": cmd_listamutados,
+    "listabanidos": cmd_listabanidos, "antipalavrao": cmd_antipalavrao,
+    "blacklist": cmd_blacklist, "antifake": cmd_antifake,
+    "antimidia": cmd_antimidia, "inativos": cmd_inativos,
+    # ----- v4: utilidades (13) -----
+    "lembretes": cmd_lembretes, "cancelarlembrete": cmd_cancelarlembrete,
+    "cep": cmd_cep, "ddd": cmd_ddd, "moeda": cmd_moeda, "wiki": cmd_wiki,
+    "dicionario": cmd_dicionario, "imc": cmd_imc, "idade": cmd_idade,
+    "regra3": cmd_regra3, "base64": cmd_base64, "hash": cmd_hash,
+    "horario": cmd_horario,
+    # ----- v4: economia e RPG (11) -----
+    "perfil": cmd_perfil, "loja": cmd_loja, "comprar": cmd_comprar,
+    "inventario": cmd_inventario, "trabalhar": cmd_trabalhar,
+    "roubar": cmd_roubar, "apostar": cmd_apostar, "banco": cmd_banco,
+    "depositar": cmd_depositar, "sacar": cmd_sacar, "casar": cmd_casar,
+    # ----- v4: diversão e social (10) -----
+    "abraco": cmd_abraco, "tapa": cmd_tapa, "elogiar": cmd_elogiar,
+    "sorteio": cmd_sorteio, "casal": cmd_casal, "piada": cmd_piada,
+    "charada": cmd_charada, "conselho": cmd_conselho,
+    "travalingua": cmd_travalingua, "top": cmd_top,
+    # ----- v4: jogos (9) -----
+    "anagrama": cmd_anagrama, "cacapalavras": cmd_cacapalavras,
+    "emojiquiz": cmd_emojiquiz, "enigma": cmd_enigma, "bingo": cmd_bingo,
+    "soletrar": cmd_soletrar, "sequencia": cmd_sequencia,
+    "campominado": cmd_campominado, "desafio": cmd_desafio,
 }
 
 
@@ -2289,6 +3284,46 @@ def handle_group_change(event):
     if not joined:
         return
 
+    # ----- ANTIFAKE: aceita apenas o DDI configurado -----
+    if db.get_setting(chat_str, "antifake") == "1":
+        allowed_ddi = db.get_setting(chat_str, "antifake_ddi", "55")
+        accepted = []
+        removed = []
+        falhou = []
+        for member in joined:
+            phone = short_jid(Jid2String(member))
+            if phone.startswith(allowed_ddi) or db.is_whitelisted(chat_str, phone):
+                accepted.append(member)
+                continue
+            try:
+                client.update_group_participants(chat, [member], ParticipantChange.REMOVE)
+                removed.append(phone)
+            except Exception:
+                # Falhou a remoção (bot sem admin, por exemplo). Não anuncia como
+                # removido — antes o grupo recebia "antifake removeu @fulano"
+                # com o fulano ainda dentro — mas também não dá boas-vindas.
+                falhou.append(phone)
+        joined = accepted
+        if falhou:
+            try:
+                client.send_message(
+                    chat,
+                    "⚠️ Antifake detectou número com DDI não permitido mas *não "
+                    "consegui remover* — confirme se o bot é admin: "
+                    + ", ".join("@" + p for p in falhou),
+                )
+            except Exception:
+                pass
+        if removed:
+            audit(chat, chat_str, "antifake", "ANTIFAKE", f"removidos: {', '.join(removed)}")
+            try:
+                client.send_message(chat, "🛂 Antifake removeu número(s) com DDI não permitido: " +
+                                    ", ".join("@" + phone for phone in removed))
+            except Exception:
+                pass
+        if not joined:
+            return
+
     # ----- ANTIBOT: bloqueia entradas feitas por quem não é admin -----
     if db.get_setting(chat_str, "antibot") == "1":
         try:
@@ -2428,6 +3463,19 @@ def handle_message(message):
     except Exception:
         pass
 
+    # ----- ANTIMÍDIA: apaga tipos configurados (exceto admin/whitelist) -----
+    try:
+        kind = _media_kind(message.Message)
+        blocked_media = set(filter(None, db.get_setting(chat_str, "antimidia", "").split(",")))
+        if (src.IsGroup and not src.IsFromMe and kind in blocked_media
+                and not _is_exempt(chat, chat_str, sender_str)):
+            revoke(chat, sender_str, msg_id)
+            audit(chat, chat_str, sender_str, "ANTIMIDIA", kind)
+            client.send_message(chat, f"🚷 @{phone}, mídia do tipo *{kind}* não é permitida.")
+            return
+    except Exception:
+        pass
+
     # ----- automoderação (antilink / antispam) -----
     if src.IsGroup and not src.IsFromMe and text and not _is_exempt(chat, chat_str, sender_str):
         # ANTILINK
@@ -2436,6 +3484,25 @@ def handle_message(message):
                 revoke(chat, sender_str, msg_id)
                 audit(chat, chat_str, sender_str, "ANTILINK", "link removido")
                 client.send_message(chat, f"🔗 @{phone}, links não são permitidos aqui! Mensagem removida.")
+                return
+        except Exception:
+            pass
+        # ANTIPALAVRÃO
+        try:
+            if db.get_setting(chat_str, "antipalavrao") == "1" and PROFANITY_RE.search(text):
+                revoke(chat, sender_str, msg_id)
+                audit(chat, chat_str, sender_str, "ANTIPALAVRAO", "mensagem removida")
+                client.send_message(chat, f"🤐 @{phone}, mantenha o respeito no grupo.")
+                return
+        except Exception:
+            pass
+        # BLACKLIST configurável por grupo
+        try:
+            forbidden = db.find_blacklisted(chat_str, text)
+            if forbidden:
+                revoke(chat, sender_str, msg_id)
+                audit(chat, chat_str, sender_str, "BLACKLIST", forbidden)
+                client.send_message(chat, f"🚫 @{phone}, sua mensagem contém uma expressão proibida.")
                 return
         except Exception:
             pass
@@ -2458,7 +3525,12 @@ def handle_message(message):
         except Exception:
             pass
 
-    # XP por mensagem
+    # atividade por grupo + XP por mensagem
+    try:
+        if src.IsGroup:
+            db.record_activity(chat_str, phone)
+    except Exception:
+        pass
     try:
         db.add_xp(sender_str)
     except Exception:

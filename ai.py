@@ -212,6 +212,59 @@ def search(query: str) -> str:
     return _call_model(config.AI_SEARCH_MODEL, messages, DEFAULT_TIMEOUT)
 
 
+# ===================== TRANSCRIÇÃO DE ÁUDIO =====================
+def _audio_format(data: bytes) -> str:
+    """Descobre o formato pelos magic bytes. '' quando precisa converter."""
+    if data[:3] == b"ID3" or (len(data) > 1 and data[0] == 0xFF and (data[1] & 0xE0) == 0xE0):
+        return "mp3"
+    if data[:4] == b"RIFF" and data[8:12] == b"WAVE":
+        return "wav"
+    return ""  # OGG/Opus (padrão do WhatsApp), M4A etc.
+
+
+def transcribe(audio_bytes: bytes, language: str = "pt") -> str:
+    """Transcreve um áudio para texto.
+
+    O áudio de voz do WhatsApp é OGG/Opus, mas a API só aceita mp3/wav, então
+    convertemos com o ffmpeg antes de enviar. A conversão é importada aqui
+    dentro para o ai.py não depender do media.py no import.
+    """
+    if not audio_bytes:
+        raise AIError("Nenhum áudio recebido para transcrever.")
+
+    fmt = _audio_format(audio_bytes)
+    if not fmt:
+        try:
+            import media
+            audio_bytes = media.to_mp3(audio_bytes)
+            fmt = "mp3"
+        except Exception as exc:
+            raise AIError(f"não consegui preparar o áudio: {exc}") from exc
+
+    b64 = base64.b64encode(audio_bytes).decode()
+    messages = [
+        {"role": "system", "content": (
+            "Você transcreve áudios com precisão. Responda APENAS com a "
+            "transcrição literal do que foi falado, sem comentários, sem "
+            "resumo e sem tradução. Se não houver fala audível, responda "
+            "exatamente: [sem fala audível]"
+        )},
+        {"role": "user", "content": [
+            {"type": "text", "text": f"Transcreva este áudio (idioma: {language})."},
+            {"type": "input_audio", "input_audio": {"data": b64, "format": fmt}},
+        ]},
+    ]
+
+    erros = []
+    for model_id in [config.AI_AUDIO_MODEL] + list(config.AI_AUDIO_FALLBACKS):
+        try:
+            return _call_model(model_id, messages, DEFAULT_TIMEOUT)
+        except AIError as exc:
+            erros.append(f"{model_id}: {exc}")
+            continue
+    raise AIError("Nenhum modelo conseguiu transcrever. " + " | ".join(erros[:2]))
+
+
 # ===================== GERAÇÃO DE IMAGEM =====================
 def _extract_image(data: dict) -> bytes:
     """Extrai os bytes da imagem gerada (OpenRouter devolve data URL)."""

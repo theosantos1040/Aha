@@ -114,6 +114,17 @@ AI_VISION_FALLBACKS = [
 # PESQUISA (/pesquisa) — modelo de texto.
 AI_SEARCH_MODEL = os.getenv("AI_SEARCH_MODEL", "openai/gpt-oss-20b:free")
 
+# TRANSCRIÇÃO DE ÁUDIO (/transcrever) — precisa de "audio" em input_modalities.
+# Conferido no catálogo do OpenRouter: dos 38 modelos que aceitam áudio, este é
+# o ÚNICO gratuito. Os fallbacks consomem créditos, mas são os mais baratos.
+AI_AUDIO_MODEL = os.getenv(
+    "AI_AUDIO_MODEL", "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+)
+AI_AUDIO_FALLBACKS = [
+    "google/gemini-2.5-flash-lite",
+    "mistralai/voxtral-small-24b-2507",
+]
+
 # GERAÇÃO DE IMAGEM (/gerarimagem) — ATENÇÃO: o OpenRouter não tem nenhum
 # modelo gratuito que gere imagem, e black-forest-labs/flux.2-klein-4b não
 # existe no catálogo deles. Este é o mais barato que realmente gera imagem;
