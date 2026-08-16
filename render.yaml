@@ -1,0 +1,43 @@
+# Blueprint do Render para o ThzyxBoTS
+# Importe este repositório em https://dashboard.render.com/blueprints
+#
+# IMPORTANTE: um bot de WhatsApp precisa de conexão SEMPRE ATIVA e de um
+# disco que sobreviva a reinícios (para não reparear toda hora). É um
+# "web service" (não worker) porque também serve a PÁGINA DE PAREAMENTO
+# (QR Code + código de 6-8 dígitos) via HTTP. Disco + sempre-ativo exigem
+# o plano pago (Starter).
+services:
+  - type: web
+    name: thzyxbots
+    runtime: docker
+    plan: starter            # web sempre-ativo + disco exigem plano pago (~US$7/mês)
+    dockerfilePath: ./Dockerfile
+    autoDeploy: true
+    healthCheckPath: /health
+    disk:
+      name: thzyx-data       # sessão do WhatsApp + banco do bot persistem aqui
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      # caminhos no disco persistente
+      - key: SESSION_DB
+        value: /data/session.sqlite3
+      - key: DATA_DB
+        value: /data/bot_data.sqlite3
+      # login via PÁGINA WEB: mostra QR Code e permite digitar o número
+      # para gerar o código de pareamento — sem precisar de terminal
+      - key: LOGIN_METHOD
+        value: web
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      # >>> defina estes no painel do Render (Environment), NÃO commite <<<
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: HF_TOKEN          # Hugging Face: necessária para o /gerarimagem
+        sync: false
+      - key: PHONE_NUMBER       # opcional: se já preencher, o código é gerado sozinho
+        sync: false
+      - key: BOT_NAME
+        sync: false
+      - key: OWNERS
+        sync: false

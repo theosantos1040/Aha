@@ -1,7 +1,7 @@
 # 🤖 ThzyxBoTS — Bot de WhatsApp com IA
 
-Bot de WhatsApp em **Python** com inteligência artificial (via **OpenRouter**) e
-**47 comandos** divididos em Administração, Utilitários e Jogos.
+Bot de WhatsApp em **Python** com IA de texto/visão via **OpenRouter**, geração
+de imagem via **Hugging Face** e **250 comandos/aliases**.
 
 > Transporte: [`neonize`](https://github.com/krypton-byte/neonize) (binding do
 > `whatsmeow`, WhatsApp **multidevice** — sem precisar de navegador aberto).
@@ -19,12 +19,11 @@ pkg install file -y
 
 git clone https://github.com/theosantos1040/Aha.git
 cd Aha
-git checkout claude/whatsapp-ai-bot-python-hk270m
 pip install -r requirements.txt
 
 cp .env.example .env
-nano .env          # cole sua OPENROUTER_API_KEY
-python run.py      # escaneie o QR code
+nano .env          # configure OPENROUTER_API_KEY, HF_TOKEN e o login
+python run.py      # login por CÓDIGO (recomendado) ou QR — ele pergunta
 ```
 
 > **`ffmpeg`** é necessário para `/va` (vídeo→áudio) e figurinhas de vídeo.
@@ -40,7 +39,7 @@ pip install -r requirements.txt
 
 # 2. Configurar
 cp .env.example .env
-# edite o .env e coloque sua OPENROUTER_API_KEY
+# edite o .env e configure OPENROUTER_API_KEY e HF_TOKEN
 
 # 3. Rodar (vai aparecer um QR code no terminal)
 python run.py
@@ -72,20 +71,72 @@ A sessão fica salva — nas próximas vezes ele conecta sozinho.
 
 ---
 
+## ☁️ Hospedar no Render (24/7)
+
+Um bot de WhatsApp precisa de conexão **sempre ativa** e de um **disco que
+sobreviva a reinícios** (senão você repareia toda hora). No Render isso é um
+**Web Service + Disk** — recursos do **plano pago** (Starter, ~US$7/mês).
+Funções serverless (Vercel/Netlify/Lambda) **não servem**: desligam sozinhas.
+
+O repositório já vem com `Dockerfile` (instala ffmpeg + libmagic) e
+`render.yaml` (define o serviço web, disco e variáveis). Passo a passo:
+
+1. **Suba seu fork** para o GitHub (branch `main`).
+2. No Render: **New → Blueprint** e selecione este repositório.
+   Ele lê o `render.yaml` e cria o **web service** + o disco `/data`
+   automaticamente.
+3. Em **Environment**, preencha as variáveis marcadas como `sync: false`:
+
+   | Variável | Valor |
+   |---|---|
+   | `OPENROUTER_API_KEY` | sua chave do OpenRouter |
+   | `HF_TOKEN` | token fine-grained da Hugging Face com permissão para Inference Providers |
+   | `PHONE_NUMBER` | (opcional) seu número: DDI+DDD+número, só dígitos (ex: `5511999999999`) |
+   | `BOT_NAME` | (opcional) nome da IA |
+   | `OWNERS` | (opcional) donos globais |
+
+   As demais (`LOGIN_METHOD=web`, `SESSION_DB`, `DATA_DB`) já vêm prontas.
+4. **Deploy.** Quando o build terminar, abra a **URL pública** que o Render
+   gera (tipo `https://thzyxbots.onrender.com`) — ela mostra uma **página de
+   pareamento** com:
+   - o **QR Code** (atualiza sozinho), **ou**
+   - um campo para digitar seu número e gerar o **código de 6-8 dígitos**.
+
+   No celular: **WhatsApp > Aparelhos conectados > Conectar um aparelho**
+   (escaneia o QR) **ou > Conectar com número de telefone** (digita o
+   código). A página avisa "✅ Conectado!" assim que parear.
+5. Pronto. A sessão fica salva no disco `/data`; nos próximos reinícios e
+   deploys ele reconecta **sozinho**, sem pedir QR/código de novo.
+
+> 💡 Se preferir o código impresso nos **Logs** em vez da página web, defina
+> `LOGIN_METHOD=code` (o Render loga em texto, sem interface visual).
+
+> 💡 O mesmo `Dockerfile` funciona em **Railway**, **Fly.io**, **DigitalOcean
+> App Platform** ou qualquer VPS com Docker — só garanta um **volume
+> persistente** montado em `/data` e as mesmas variáveis de ambiente.
+
+> ⚠️ Não existe tier 100% grátis adequado aqui: web services grátis do Render
+> **hibernam** após 15 min (derrubam o bot) e **não têm disco persistente**
+> (perde a sessão a cada restart). Para algo sério, use o worker pago ou um VPS.
+
+---
+
 ## 🔑 Configuração (`.env`)
 
 | Variável | Descrição |
 |---|---|
 | `OPENROUTER_API_KEY` | Sua chave do [OpenRouter](https://openrouter.ai/keys) |
+| `HF_TOKEN` | Token fine-grained da [Hugging Face](https://huggingface.co/settings/tokens) para `/gerarimagem` |
+| `PHONE_NUMBER` | Número de pareamento (DDI+DDD+número), sem valor padrão no código |
 | `BOT_NAME` | Nome da IA (padrão: `ThzyxBoTS`) |
 | `DEFAULT_PREFIX` | Prefixo dos comandos (padrão: `/`) |
 | `SESSION_DB` | Arquivo da sessão do WhatsApp |
 | `DATA_DB` | Banco de dados do bot (economia, XP, etc.) |
 | `OWNERS` | (opcional) números de donos globais, separados por vírgula |
 
-> ⚠️ **Segurança:** sua chave foi compartilhada em texto puro. **Gere uma nova**
-> em https://openrouter.ai/keys e nunca a coloque dentro do código ou em
-> arquivos versionados. O `.env` já está no `.gitignore`.
+> ⚠️ **Segurança:** o histórico antigo deste repositório já conteve uma chave
+> OpenRouter. Ela deve ser revogada/rotacionada no painel do OpenRouter. Nunca
+> coloque chaves no código; o `.env` já está no `.gitignore`.
 
 ---
 
@@ -143,12 +194,93 @@ Três modelos gratuitos, **testados de verdade (HTTP 200)**:
 - **`/setlogs`** — canal de auditoria em tempo real; **`/auditlog`** lista as últimas ações.
 
 > ⚠️ **Para apagar mensagens de OUTROS** (`/clear`, `/mute`, `/antilink`) o bot
-> precisa ser **administrador** do grupo. **`/ttkvd`, `/fg` (vídeo) e `/va`**
-> exigem **ffmpeg** (`pkg install ffmpeg -y`).
+> precisa ser **administrador** do grupo.
+>
+> 🖼️ **Figurinha de IMAGEM (`/fg`) funciona SEM ffmpeg** — convertemos com
+> Pillow para WebP 512×512 e enviamos com `passthrough`. Só **figurinha de
+> vídeo** e **`/va` (áudio)** precisam de **ffmpeg** (`pkg install ffmpeg -y`).
+> Se o seu ffmpeg não tiver o encoder **libwebp** (comum no Termux), a figurinha
+> de vídeo não é possível e o bot avisa de forma clara — use uma imagem.
 
 ### 🎮 Jogos & Brincadeiras (10)
 `/coinflip` · `/jokenpo` · `/8ball` · `/roll` · `/tictactoe` · `/trivia` ·
 `/hangman` · `/akinator` · `/russianroulette` · `/ship`
+
+---
+
+## 🤖 IA Avançada (configurável por grupo)
+
+| Comando | O que faz |
+|---|---|
+| `/iamode <carinhosa\|zoeira\|sincera>` | Muda a **personalidade** da IA no grupo 💙😆🎯 |
+| `/aimodel <chatgpt\|nex\|glm\|gemini>` | Escolhe o **modelo** (gemini = Google Gemma) |
+| `/thinking <on\|off>` | **Modo pensamento**: mostra o raciocínio antes de responder ⏳ |
+| `/aisetname <nome>` | Dá um **nome** à IA no grupo |
+| `/aisetbio <texto>` | Define uma **descrição/personalidade** customizada |
+| `/aichannel` · `/aireset` · `/aistatus` | Canal da IA · resetar · ver status atual |
+
+> Os 4 modelos foram **testados ao vivo (HTTP 200)**. `gemini` usa
+> `google/gemma-4-31b-it:free` — não existe um *Gemini* gratuito no OpenRouter,
+> então usamos o modelo aberto do Google (Gemma). O apelido `ling` usa
+> `inclusionai/ling-3.0-flash:free` (só texto).
+
+## 👁️ IA: visão, geração de imagem e pesquisa
+
+| Comando | O que faz | Modelo |
+|---|---|---|
+| `/analiseia` (`/analisar`, `/vision`) | Analisa uma **foto ou vídeo** (enviado ou citado) | `nvidia/nemotron-nano-12b-v2-vl:free` |
+| `/pesquisa` (`/pesquisar`) | Pesquisa organizada sobre um assunto | `openai/gpt-oss-20b:free` |
+| `/gerarimagem` (`/imagine`) | Gera imagem a partir de texto | Hugging Face (fallback abaixo) |
+
+**Visão automática:** basta **marcar o bot numa foto/vídeo** — ele analisa sem
+precisar de comando. Com legenda, a legenda vira a pergunta.
+
+```
+/analiseia o que está escrito nessa placa?
+/pesquisa como funciona o PIX
+/gerarimagem um gato astronauta em aquarela
+```
+
+`/gerarimagem` usa **somente a Hugging Face**, através do cliente oficial e da
+`HF_TOKEN`, nesta ordem fixa:
+
+1. `warp-ai/wuerstchen`
+2. `black-forest-labs/FLUX.1-schnell`
+3. `stabilityai/stable-diffusion-xl-base-1.0` (SDXL)
+4. `stable-diffusion-v1-5/stable-diffusion-v1-5` (SD 1.5)
+5. `prompthero/openjourney`
+
+Modelos sem Inference Provider disponível são pulados automaticamente. As
+chamadas consomem os créditos de inferência da conta Hugging Face; a franquia
+e os preços podem mudar.
+
+> 🎬 Analisar **vídeo** extrai um quadro com `ffmpeg`. **Foto funciona sem ffmpeg.**
+
+## 👑 v3.1 PRO — +100 comandos
+
+**Admin (novos):** `/giverole` `/temprole` `/tempban` `/softban` `/massrole`
+`/createrole` `/deleterole` `/setwelcome` `/setbye` `/autorole` `/setmodlog`
+`/logs` `/backupserver` `/restorebackup`
+
+**Gerais (novos):** `/qr` `/shorturl` `/password` `/meme` `/quote` `/fact`
+`/crypto` `/timer` `/countdown` `/stopwatch` `/convert` `/emojify` `/snipe`
+`/banner` `/roleinfo` `/membercount` `/randomuser` `/randomnumber` `/choose`
+`/reverse` `/sayembed`
+
+**Jogos (novos, 50):** cassino (`/slot` `/blackjack` `/roulette` `/crash`
+`/higherlower` `/coinwar` `/poker`), RPG/aventura (`/battle` `/duel` `/bossfight`
+`/arena` `/treasurehunt` `/heist` `/escape` `/labyrinth` `/dungeon` `/tower`
+`/fishing` `/mining` `/hunt` `/petbattle` `/dragonhunt` `/farm` `/race`
+`/parkour`), adivinhação (`/guessnumber` `/mathrace` `/guessflag`
+`/guesspokemon` `/guessanime` `/wordchain`), sociais de grupo (`/mafia`
+`/detective` `/spy` `/infected` `/murdermystery` `/zombie` `/survivor`
+`/kingdom` `/hotpotato`) e festa (`/wouldyourather` `/truth` `/dare`
+`/neverhaveiever`).
+
+> Alguns comandos de Discord **não existem na API do WhatsApp**
+> (`/createchannel`, `/hidechannel`, `/clonechannel`, `/nickname`, `/boosts`,
+> `/firstmessage`…). Eles estão registrados, mas respondem de forma **honesta**
+> explicando a limitação — sem fingir que funcionam.
 
 ---
 
@@ -189,6 +321,7 @@ rodam sem precisar de conta/QR.
 ```
 run.py          # ponto de entrada
 bot.py          # eventos + handlers de todos os comandos (neonize)
+webui.py        # página web de pareamento (QR + código) — LOGIN_METHOD=web
 ai.py           # cliente OpenRouter (retry + fallback de modelo/reasoning)
 database.py     # SQLite: economia, XP, warns, AFK, prefixo, banlist...
 games.py        # lógica pura dos jogos
