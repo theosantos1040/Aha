@@ -1,7 +1,7 @@
 # 🤖 ThzyxBoTS — Bot de WhatsApp com IA
 
-Bot de WhatsApp em **Python** com inteligência artificial (via **OpenRouter**) e
-**47 comandos** divididos em Administração, Utilitários e Jogos.
+Bot de WhatsApp em **Python** com IA de texto/visão via **OpenRouter**, geração
+de imagem via **Hugging Face** e **250 comandos/aliases**.
 
 > Transporte: [`neonize`](https://github.com/krypton-byte/neonize) (binding do
 > `whatsmeow`, WhatsApp **multidevice** — sem precisar de navegador aberto).
@@ -19,11 +19,10 @@ pkg install file -y
 
 git clone https://github.com/theosantos1040/Aha.git
 cd Aha
-git checkout claude/whatsapp-ai-bot-python-hk270m
 pip install -r requirements.txt
 
 cp .env.example .env
-nano .env          # cole sua OPENROUTER_API_KEY (e PHONE_NUMBER, opcional)
+nano .env          # configure OPENROUTER_API_KEY, HF_TOKEN e o login
 python run.py      # login por CÓDIGO (recomendado) ou QR — ele pergunta
 ```
 
@@ -40,7 +39,7 @@ pip install -r requirements.txt
 
 # 2. Configurar
 cp .env.example .env
-# edite o .env e coloque sua OPENROUTER_API_KEY
+# edite o .env e configure OPENROUTER_API_KEY e HF_TOKEN
 
 # 3. Rodar (vai aparecer um QR code no terminal)
 python run.py
@@ -76,13 +75,13 @@ A sessão fica salva — nas próximas vezes ele conecta sozinho.
 
 Um bot de WhatsApp precisa de conexão **sempre ativa** e de um **disco que
 sobreviva a reinícios** (senão você repareia toda hora). No Render isso é um
-**Background Worker + Disk** — recursos do **plano pago** (Starter, ~US$7/mês).
+**Web Service + Disk** — recursos do **plano pago** (Starter, ~US$7/mês).
 Funções serverless (Vercel/Netlify/Lambda) **não servem**: desligam sozinhas.
 
 O repositório já vem com `Dockerfile` (instala ffmpeg + libmagic) e
 `render.yaml` (define o serviço web, disco e variáveis). Passo a passo:
 
-1. **Suba seu fork** para o GitHub (branch `claude/whatsapp-ai-bot-python-hk270m`).
+1. **Suba seu fork** para o GitHub (branch `main`).
 2. No Render: **New → Blueprint** e selecione este repositório.
    Ele lê o `render.yaml` e cria o **web service** + o disco `/data`
    automaticamente.
@@ -91,6 +90,7 @@ O repositório já vem com `Dockerfile` (instala ffmpeg + libmagic) e
    | Variável | Valor |
    |---|---|
    | `OPENROUTER_API_KEY` | sua chave do OpenRouter |
+   | `HF_TOKEN` | token fine-grained da Hugging Face com permissão para Inference Providers |
    | `PHONE_NUMBER` | (opcional) seu número: DDI+DDD+número, só dígitos (ex: `5511999999999`) |
    | `BOT_NAME` | (opcional) nome da IA |
    | `OWNERS` | (opcional) donos globais |
@@ -126,15 +126,17 @@ O repositório já vem com `Dockerfile` (instala ffmpeg + libmagic) e
 | Variável | Descrição |
 |---|---|
 | `OPENROUTER_API_KEY` | Sua chave do [OpenRouter](https://openrouter.ai/keys) |
+| `HF_TOKEN` | Token fine-grained da [Hugging Face](https://huggingface.co/settings/tokens) para `/gerarimagem` |
+| `PHONE_NUMBER` | Número de pareamento (DDI+DDD+número), sem valor padrão no código |
 | `BOT_NAME` | Nome da IA (padrão: `ThzyxBoTS`) |
 | `DEFAULT_PREFIX` | Prefixo dos comandos (padrão: `/`) |
 | `SESSION_DB` | Arquivo da sessão do WhatsApp |
 | `DATA_DB` | Banco de dados do bot (economia, XP, etc.) |
 | `OWNERS` | (opcional) números de donos globais, separados por vírgula |
 
-> ⚠️ **Segurança:** sua chave foi compartilhada em texto puro. **Gere uma nova**
-> em https://openrouter.ai/keys e nunca a coloque dentro do código ou em
-> arquivos versionados. O `.env` já está no `.gitignore`.
+> ⚠️ **Segurança:** o histórico antigo deste repositório já conteve uma chave
+> OpenRouter. Ela deve ser revogada/rotacionada no painel do OpenRouter. Nunca
+> coloque chaves no código; o `.env` já está no `.gitignore`.
 
 ---
 
@@ -228,7 +230,7 @@ Três modelos gratuitos, **testados de verdade (HTTP 200)**:
 |---|---|---|
 | `/analiseia` (`/analisar`, `/vision`) | Analisa uma **foto ou vídeo** (enviado ou citado) | `nvidia/nemotron-nano-12b-v2-vl:free` |
 | `/pesquisa` (`/pesquisar`) | Pesquisa organizada sobre um assunto | `openai/gpt-oss-20b:free` |
-| `/gerarimagem` (`/imagine`) | Gera imagem a partir de texto | `google/gemini-2.5-flash-image` |
+| `/gerarimagem` (`/imagine`) | Gera imagem a partir de texto | Hugging Face (fallback abaixo) |
 
 **Visão automática:** basta **marcar o bot numa foto/vídeo** — ele analisa sem
 precisar de comando. Com legenda, a legenda vira a pergunta.
@@ -239,21 +241,19 @@ precisar de comando. Com legenda, a legenda vira a pergunta.
 /gerarimagem um gato astronauta em aquarela
 ```
 
-> ⚠️ **Sobre os modelos pedidos — o que existe de fato no OpenRouter:**
->
-> | Pedido | Situação |
-> |---|---|
-> | `inclusionai/ling-3.0-flash:free` | ✅ existe, mas é **só texto** (`input_modalities: ["text"]`) — **não serve para visão**. Ficou disponível como `/IA ling`. |
-> | `black-forest-labs/flux.2-klein-4b` | ❌ **não existe** no catálogo do OpenRouter (nenhum modelo `flux`/`black-forest`). |
-> | `openai/gpt-oss-20b:free` | ✅ existe — é o modelo de `/pesquisa`. |
->
-> Para **visão** usamos `nvidia/nemotron-nano-12b-v2-vl:free` (gratuito e aceita
-> imagem de verdade), com fallback para os Gemma. Para **gerar imagem** não há
-> nenhum modelo gratuito no OpenRouter — `/gerarimagem` usa o mais barato que
-> realmente gera (`google/gemini-2.5-flash-image`) e **consome créditos**; sem
-> crédito o bot avisa de forma clara. Todos configuráveis por `.env`
-> (`AI_VISION_MODEL`, `AI_SEARCH_MODEL`, `AI_IMAGE_MODEL`).
->
+`/gerarimagem` usa **somente a Hugging Face**, através do cliente oficial e da
+`HF_TOKEN`, nesta ordem fixa:
+
+1. `warp-ai/wuerstchen`
+2. `black-forest-labs/FLUX.1-schnell`
+3. `stabilityai/stable-diffusion-xl-base-1.0` (SDXL)
+4. `stable-diffusion-v1-5/stable-diffusion-v1-5` (SD 1.5)
+5. `prompthero/openjourney`
+
+Modelos sem Inference Provider disponível são pulados automaticamente. As
+chamadas consomem os créditos de inferência da conta Hugging Face; a franquia
+e os preços podem mudar.
+
 > 🎬 Analisar **vídeo** extrai um quadro com `ffmpeg`. **Foto funciona sem ffmpeg.**
 
 ## 👑 v3.1 PRO — +100 comandos

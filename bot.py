@@ -1,4 +1,4 @@
-"""ThzyxBoTS - Bot de WhatsApp com IA (OpenRouter) e +40 comandos.
+"""ThzyxBoTS - Bot de WhatsApp com IA e 250 comandos/aliases.
 
 Transporte: neonize (binding do whatsmeow, WhatsApp multidevice).
 Execute com:  python run.py   (escaneie o QR com o WhatsApp)
@@ -63,6 +63,14 @@ _spam_track = {}
 _msg_text = defaultdict(lambda: deque(maxlen=200))
 # última mensagem apagada por chat p/ /snipe (chat_str -> (sender, texto))
 _last_deleted = {}
+
+# Protege créditos e o loop de eventos: no máximo duas gerações simultâneas e
+# uma solicitação por usuário/minuto. O trabalho pesado roda em thread daemon.
+IMAGE_MAX_CONCURRENCY = 2
+IMAGE_COOLDOWN_SECONDS = 60
+_image_slots = threading.BoundedSemaphore(IMAGE_MAX_CONCURRENCY)
+_image_cooldowns = {}
+_image_cooldown_lock = threading.Lock()
 
 
 LINK_RE = re.compile(
@@ -775,19 +783,71 @@ def cmd_analiseia(ctx):
 
 
 def cmd_gerarimagem(ctx):
-    if not ctx.args.strip():
+    prompt = ctx.args.strip()
+    if not prompt:
         return ctx.reply("🎨 Uso: /gerarimagem <descrição>\nEx: /gerarimagem um gato astronauta")
-    ctx.reply("🎨 Gerando a imagem… isso pode levar alguns segundos.")
+    if len(prompt) > 1000:
+        return ctx.reply("❌ A descrição é longa demais (máximo: 1000 caracteres).")
+
+    now = time.monotonic()
+    cooldown_key = ctx.sender_str
+    rejection = None
+    with _image_cooldown_lock:
+        stale = [
+            key for key, started in _image_cooldowns.items()
+            if now - started >= IMAGE_COOLDOWN_SECONDS
+        ]
+        for key in stale:
+            _image_cooldowns.pop(key, None)
+        previous = _image_cooldowns.get(cooldown_key)
+        elapsed = now - previous if previous is not None else IMAGE_COOLDOWN_SECONDS
+        if previous is not None and elapsed < IMAGE_COOLDOWN_SECONDS:
+            remaining = max(1, int(IMAGE_COOLDOWN_SECONDS - elapsed + 0.999))
+            rejection = f"⏳ Aguarde {remaining}s antes de gerar outra imagem."
+        elif not _image_slots.acquire(blocking=False):
+            rejection = (
+                "🎨 Já existem imagens sendo geradas. Tente novamente em instantes."
+            )
+        else:
+            _image_cooldowns[cooldown_key] = now
+
+    if rejection:
+        return ctx.reply(rejection)
+
+    target_client = client
+    target_chat = ctx.chat
+    target_message = ctx.msg
+
+    def reply(text):
+        try:
+            target_client.reply_message(text, target_message, to=target_chat)
+        except Exception:
+            target_client.send_message(target_chat, text)
+
+    def generate_and_send():
+        try:
+            img = ai_generate_image(prompt)
+            target_client.send_image(
+                target_chat, img, caption=f"🎨 {prompt[:200]}"
+            )
+        except AIError as exc:
+            reply(f"❌ {exc}")
+        except Exception as exc:
+            reply(f"❌ Erro ao gerar imagem: {exc}")
+        finally:
+            _image_slots.release()
+
     try:
-        img = ai_generate_image(ctx.args.strip())
-    except AIError as exc:
-        return ctx.reply(f"❌ {exc}")
+        ctx.reply("🎨 Gerando a imagem… isso pode levar alguns segundos.")
+        threading.Thread(target=generate_and_send, daemon=True).start()
     except Exception as exc:
-        return ctx.reply(f"❌ Erro ao gerar imagem: {exc}")
-    try:
-        client.send_image(ctx.chat, img, caption=f"🎨 {ctx.args.strip()[:200]}")
-    except Exception as exc:
-        ctx.reply(f"❌ Gerei a imagem mas não consegui enviar: {exc}")
+        _image_slots.release()
+        with _image_cooldown_lock:
+            _image_cooldowns.pop(cooldown_key, None)
+        try:
+            ctx.reply(f"❌ Não consegui iniciar a geração: {exc}")
+        except Exception:
+            pass
 
 
 def cmd_pesquisa(ctx):
