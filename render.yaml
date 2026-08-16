@@ -33,6 +33,8 @@ services:
       # >>> defina estes no painel do Render (Environment), NÃO commite <<<
       - key: OPENROUTER_API_KEY
         sync: false
+      - key: HF_TOKEN          # Hugging Face: necessária para o /gerarimagem
+        sync: false
       - key: PHONE_NUMBER       # opcional: se já preencher, o código é gerado sozinho
         sync: false
       - key: BOT_NAME
