@@ -265,44 +265,238 @@ def transcribe(audio_bytes: bytes, language: str = "pt") -> str:
     raise AIError("Nenhum modelo conseguiu transcrever. " + " | ".join(erros[:2]))
 
 
-# ===================== GERAÇÃO DE IMAGEM =====================
-def _extract_image(data: dict) -> bytes:
-    """Extrai os bytes da imagem gerada (OpenRouter devolve data URL)."""
+# ===================== GERAÇÃO DE IMAGEM (Hugging Face) =====================
+# O /gerarimagem usa EXCLUSIVAMENTE a Hugging Face. O OpenRouter foi deixado
+# de fora porque lá geração de imagem cobra créditos da conta.
+HF_TIMEOUT = 120          # modelos de imagem demoram; nunca ficar sem timeout
+HF_MAX_RETRIES = 4        # só para erro transitório (429/5xx/rede)
+HF_MAX_WAIT = 30          # teto de espera do "modelo carregando" (503)
+
+HF_TOKEN_HELP = (
+    "Configure HF_TOKEN no .env (ou no painel do Render) com uma token "
+    "criada em https://huggingface.co/settings/tokens — marque a permissão "
+    "'Make calls to Inference Providers'."
+)
+
+
+class _ModeloIndisponivel(AIError):
+    """Modelo saiu do ar/não tem provedor: dá para tentar o próximo da cadeia.
+
+    É subclasse de AIError de propósito: se vazar para quem chamou, continua
+    sendo o mesmo tipo de erro que o bot.py já trata.
+    """
+
+
+def _hf_legacy_url(model: str) -> str:
+    """Rota ANTIGA do router (200 = bytes crus da imagem).
+
+    Só é usada como último recurso: hoje o provedor "hf-inference" serve
+    praticamente nenhum dos modelos da cadeia, então a rota nova
+    (config.HF_IMAGE_URL, com auto-roteamento) vem primeiro.
+    """
+    return f"https://router.huggingface.co/hf-inference/models/{model}"
+
+
+def _hf_headers() -> dict:
+    return {
+        "Authorization": f"Bearer {config.HF_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
+
+def _hf_espera_carregando(resp, attempt: int) -> float:
+    """Quanto esperar num HTTP 503 ('modelo carregando'), com teto."""
+    espera = 2 ** attempt
     try:
-        msg = data["choices"][0]["message"]
-    except (KeyError, IndexError, TypeError):
+        estimado = float(resp.json().get("estimated_time", 0))
+        if estimado > 0:
+            espera = estimado
+    except Exception:
+        pass
+    return min(espera, HF_MAX_WAIT)
+
+
+def _sao_bytes_de_imagem(dados: bytes) -> bool:
+    """Magic bytes de PNG / JPEG / WEBP — confere se veio imagem mesmo."""
+    return bool(dados) and dados[:8].startswith(
+        (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"RIFF")
+    )
+
+
+def _hf_baixa_url(url: str) -> bytes:
+    """Baixa a imagem quando o provedor devolve URL em vez de base64."""
+    try:
+        resp = requests.get(url, timeout=HF_TIMEOUT)
+    except requests.RequestException:
         return b""
-    for img in (msg.get("images") or []):
-        url = (img.get("image_url") or {}).get("url", "")
-        if url.startswith("data:") and "base64," in url:
+    if resp.status_code != 200:
+        return b""
+    if "image" in (resp.headers.get("Content-Type") or ""):
+        return resp.content
+    return resp.content if _sao_bytes_de_imagem(resp.content) else b""
+
+
+def _hf_extrai_json(resp) -> bytes:
+    """Extrai a imagem da resposta da rota nova (formato estilo OpenAI).
+
+    O formato varia por provedor: uns mandam `b64_json`, outros só uma `url`.
+    Devolve b"" quando não deu para extrair (aí vale a pena retentar).
+    """
+    try:
+        dados = resp.json()
+    except Exception:
+        return b""
+    itens = dados.get("data") or dados.get("images") or []
+    if isinstance(itens, dict):
+        itens = [itens]
+    for item in itens:
+        if not isinstance(item, dict):
+            continue
+        b64 = item.get("b64_json") or item.get("image_base64")
+        if b64:
             try:
-                return base64.b64decode(url.split("base64,", 1)[1])
+                return base64.b64decode(b64)
             except Exception:
                 continue
+        url = item.get("url")
+        if url:
+            baixado = _hf_baixa_url(url)
+            if baixado:
+                return baixado
     return b""
+
+
+def _hf_extrai_bytes(resp) -> bytes:
+    """Extrai a imagem da rota antiga, que devolve os bytes crus."""
+    if "image" in (resp.headers.get("Content-Type") or ""):
+        return resp.content
+    # às vezes o Content-Type vem errado: confere pelos magic bytes
+    return resp.content if _sao_bytes_de_imagem(resp.content) else b""
+
+
+def _hf_post_imagem(url: str, payload: dict, extrair) -> bytes:
+    """POST na Hugging Face com retry/backoff, devolvendo os bytes da imagem.
+
+    `extrair(resp)` tira a imagem do HTTP 200 e devolve b"" se não achou.
+    Levanta `_ModeloIndisponivel` quando não adianta insistir NESSA rota/modelo
+    (a cadeia deve descer) e `AIError` quando o problema é da conta
+    (token/franquia) — aí trocar de modelo não resolve nada.
+    """
+    ultimo_erro = ""
+    for attempt in range(HF_MAX_RETRIES):
+        try:
+            resp = requests.post(
+                url, headers=_hf_headers(), json=payload, timeout=HF_TIMEOUT,
+            )
+        except requests.RequestException as exc:
+            ultimo_erro = f"rede: {exc}"
+            time.sleep(2 ** attempt)
+            continue
+
+        status = resp.status_code
+
+        if status == 200:
+            imagem = extrair(resp)
+            if imagem:
+                return imagem
+            # 200 sem imagem costuma ser JSON de erro disfarçado
+            ultimo_erro = "a resposta veio sem imagem"
+            time.sleep(2 ** attempt)
+            continue
+
+        corpo = (resp.text or "")[:200]
+        corpo_baixo = corpo.lower()
+
+        # --- problemas da CONTA: trocar de modelo não resolve ---
+        if status == 402 or "credit" in corpo_baixo or "quota" in corpo_baixo:
+            raise AIError(
+                "A franquia mensal de inferência da sua conta Hugging Face "
+                "acabou. Espere renovar no próximo mês ou assine o PRO em "
+                "https://huggingface.co/settings/billing."
+            )
+        if status in (401, 403):
+            raise AIError(
+                f"Hugging Face recusou a token (HTTP {status}): ela é inválida "
+                f"ou não tem permissão de inferência. {HF_TOKEN_HELP}"
+            )
+
+        # --- modelo carregando: respeita o estimated_time (teto de 30s) ---
+        if status == 503:
+            ultimo_erro = "modelo carregando (HTTP 503)"
+            time.sleep(_hf_espera_carregando(resp, attempt))
+            continue
+
+        # --- transitórios: vale a pena retentar ---
+        if status in (429, 500, 502, 504):
+            ultimo_erro = f"HTTP {status}"
+            time.sleep(2 ** attempt)
+            continue
+
+        # --- modelo morto/inexistente: desce a cadeia SEM gastar retry ---
+        raise _ModeloIndisponivel(f"HTTP {status}: {corpo}")
+
+    raise _ModeloIndisponivel(
+        f"falhou após {HF_MAX_RETRIES} tentativas ({ultimo_erro})"
+    )
+
+
+def _hf_image_model(model: str, prompt: str) -> bytes:
+    """Gera a imagem num modelo específico da HF.
+
+    Tenta primeiro a rota com AUTO-ROTEAMENTO (config.HF_IMAGE_URL), que deixa
+    a própria HF escolher um provedor vivo. Se ela responder 404 (rota ou
+    modelo desconhecido), tenta a rota antiga /hf-inference/models/{modelo},
+    que devolve os bytes crus.
+    """
+    try:
+        return _hf_post_imagem(
+            config.HF_IMAGE_URL,
+            {"model": model, "prompt": prompt, "response_format": "b64_json"},
+            _hf_extrai_json,
+        )
+    except _ModeloIndisponivel as exc:
+        if "HTTP 404" not in str(exc):
+            raise
+        erro_rota_nova = exc
+
+    try:
+        return _hf_post_imagem(
+            _hf_legacy_url(model), {"inputs": prompt}, _hf_extrai_bytes
+        )
+    except _ModeloIndisponivel as exc:
+        raise _ModeloIndisponivel(
+            f"{erro_rota_nova} (rota antiga hf-inference: {exc})"
+        ) from exc
 
 
 def generate_image(prompt: str) -> bytes:
     """Gera uma imagem a partir de um texto e devolve os bytes (PNG/JPEG).
 
-    Não existe modelo GRATUITO de geração de imagem no OpenRouter — este
-    endpoint consome créditos da conta. Se faltar crédito, o OpenRouter
-    responde 402 e a mensagem explica isso ao usuário.
+    Usa SÓ a Hugging Face: começa em config.HF_IMAGE_MODEL e desce por
+    config.HF_IMAGE_FALLBACKS enquanto os modelos estiverem indisponíveis.
     """
     if not prompt.strip():
         raise AIError("Descreva a imagem que devo gerar.")
-    payload = {
-        "model": config.AI_IMAGE_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "modalities": ["image", "text"],
-    }
-    try:
-        return _request(payload, DEFAULT_TIMEOUT, _extract_image)
-    except AIError as exc:
-        texto = str(exc)
-        if "402" in texto or "credit" in texto.lower():
-            raise AIError(
-                "Geração de imagem exige créditos no OpenRouter (não há modelo "
-                "gratuito para isso). Adicione créditos em openrouter.ai/credits."
-            )
-        raise
+    if not config.HF_TOKEN:
+        raise AIError(
+            "A geração de imagem usa a Hugging Face e falta a HF_TOKEN. "
+            + HF_TOKEN_HELP
+        )
+
+    principal = config.HF_IMAGE_MODEL
+    candidatos = [principal] + [
+        m for m in config.HF_IMAGE_FALLBACKS if m != principal
+    ]
+
+    erros = []
+    for modelo in candidatos:
+        try:
+            return _hf_image_model(modelo, prompt)
+        except _ModeloIndisponivel as exc:
+            erros.append(f"{modelo}: {exc}")
+            continue  # modelo fora do ar: tenta o próximo da cadeia
+
+    raise AIError(
+        "Nenhum modelo de imagem da Hugging Face respondeu agora. "
+        + " | ".join(erros[:2])
+    )

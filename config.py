@@ -76,6 +76,14 @@ DEFAULT_PREFIX = os.getenv("DEFAULT_PREFIX", "/")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
+# ---- Hugging Face ------------------------------------------------------
+# Token da Hugging Face, usada pelo /gerarimagem (é a ÚNICA fonte de imagem
+# agora — o OpenRouter foi abandonado nesse comando porque cobra créditos).
+# A token NUNCA vai no código: defina no .env local ou no painel do Render.
+# Pegue a sua em https://huggingface.co/settings/tokens e marque a permissão
+# "Make calls to Inference Providers". Sem token, a HF responde HTTP 401.
+HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
+
 SESSION_DB = os.getenv("SESSION_DB", "session.sqlite3")
 DATA_DB = os.getenv("DATA_DB", "bot_data.sqlite3")
 
@@ -125,11 +133,55 @@ AI_AUDIO_FALLBACKS = [
     "mistralai/voxtral-small-24b-2507",
 ]
 
-# GERAÇÃO DE IMAGEM (/gerarimagem) — ATENÇÃO: o OpenRouter não tem nenhum
-# modelo gratuito que gere imagem, e black-forest-labs/flux.2-klein-4b não
-# existe no catálogo deles. Este é o mais barato que realmente gera imagem;
-# exige créditos na conta. Troque via AI_IMAGE_MODEL se quiser outro.
+# GERAÇÃO DE IMAGEM antiga (OpenRouter). MANTIDO SÓ POR COMPATIBILIDADE:
+# o /gerarimagem NÃO usa mais isso, porque o OpenRouter cobra créditos para
+# gerar imagem. Hoje o comando usa exclusivamente a Hugging Face (HF_* abaixo).
 AI_IMAGE_MODEL = os.getenv("AI_IMAGE_MODEL", "google/gemini-2.5-flash-image")
+
+# ---- GERAÇÃO DE IMAGEM (/gerarimagem) — Hugging Face --------------------
+# Rota principal (auto-roteamento, compatível com a API da OpenAI):
+#   POST https://router.huggingface.co/v1/images/generations
+#   body {"model": "<id>", "prompt": "<texto>", "response_format": "b64_json"}
+# A própria HF escolhe um provedor VIVO para o modelo (fal-ai, replicate,
+# nscale, together, wavespeed...). A resposta é JSON e a imagem vem em
+# data[0].b64_json OU em data[0].url — o ai.py trata os dois casos.
+#
+# NÃO use mais a rota antiga /hf-inference/models/{modelo}: o provedor
+# "hf-inference" hoje serve UM único modelo de texto-para-imagem
+# (stabilityai/stable-diffusion-3-medium-diffusers), nenhum da cadeia abaixo.
+# Ela continua como último recurso no ai.py, caso a rota nova devolva 404.
+#
+# A cadeia começa em HF_IMAGE_MODEL e desce por HF_IMAGE_FALLBACKS até algum
+# modelo responder. A ORDEM dos 5 primeiros é a pedida pelo usuário e está
+# mantida de propósito, mesmo sabendo que 3 deles NÃO funcionam mais:
+#
+#   1. warp-ai/wuerstchen ....................... MORTO — sem provedor de
+#      inferência (campo inferenceProviderMapping vazio na API da HF).
+#   2. black-forest-labs/FLUX.1-schnell ......... VIVO (nscale, fal-ai,
+#      together, wavespeed).
+#   3. stabilityai/stable-diffusion-xl-base-1.0 . VIVO (fal-ai).
+#   4. runwayml/stable-diffusion-v1-5 ........... MORTO — sem provedor.
+#   5. prompthero/openjourney ................... MORTO — sem provedor.
+#
+# Os mortos respondem 404/410/400 "not supported" na hora, então custam
+# quase nada: a cadeia desce para o próximo sem gastar retry. Ficam na lista
+# só porque foram pedidos e porque podem voltar a ter provedor um dia.
+# Os três últimos foram conferidos como VIVOS e existem para o comando de
+# fato funcionar quando os anteriores falharem.
+HF_IMAGE_URL = os.getenv(
+    "HF_IMAGE_URL", "https://router.huggingface.co/v1/images/generations"
+)
+HF_IMAGE_MODEL = os.getenv("HF_IMAGE_MODEL", "warp-ai/wuerstchen")
+HF_IMAGE_FALLBACKS = [
+    "black-forest-labs/FLUX.1-schnell",          # vivo
+    "stabilityai/stable-diffusion-xl-base-1.0",  # vivo
+    "runwayml/stable-diffusion-v1-5",            # morto (sem provedor)
+    "prompthero/openjourney",                    # morto (sem provedor)
+    # --- confirmados vivos, garantem que o comando responda ---
+    "Qwen/Qwen-Image",          # fal-ai, replicate, wavespeed
+    "Tongyi-MAI/Z-Image-Turbo",  # fal-ai, replicate, wavespeed
+    "black-forest-labs/FLUX.1-dev",  # fal-ai, replicate, wavespeed
+]
 
 # Personalidades da IA por grupo (/iamode). Cada modo injeta um trecho no
 # system prompt para mudar o tom das respostas.
