@@ -3144,6 +3144,7 @@ def handle_connected():
     _paired.set()  # encerra o loop de reconexão de pareamento
     _me_phone(refresh=True)  # cacheia o próprio número (detectar menções)
     webui.set_connected()
+    _mark_alive()
 
 
 def handle_pair(message):
@@ -3176,19 +3177,19 @@ def handle_connect_failure(event):
         reason_name = str(event.Reason)
     reason = f"{reason_name} — {event.Message}" if event.Message else reason_name
     print(f"❌ Falha ao conectar ao WhatsApp: {reason}")
-    webui.set_error(f"O WhatsApp recusou a conexão: {reason}")
+    webui.set_disconnected(f"O WhatsApp recusou a conexão: {reason}")
 
 
 def handle_disconnected(event):
     _wa_ready.clear()
     print(f"🔌 Desconectado do WhatsApp (status booleano={event.status}).")
-    webui.set_error("Conexão com o WhatsApp caiu. Recarregue a página em alguns segundos.")
+    webui.set_disconnected("Conexão com o WhatsApp caiu. Recarregue a página em alguns segundos.")
 
 
 def handle_stream_error(event):
     _wa_ready.clear()
     print(f"⚠️ Erro de stream do WhatsApp: code={event.Code} raw={event.Raw}")
-    webui.set_error(f"Erro de stream do WhatsApp (code={event.Code}). Tente novamente em alguns instantes.")
+    webui.set_disconnected(f"Erro de stream do WhatsApp (code={event.Code}). Tente novamente em alguns instantes.")
 
 
 def handle_logged_out(event):
@@ -3198,7 +3199,7 @@ def handle_logged_out(event):
     except Exception:
         reason_name = str(event.Reason)
     print(f"🚪 Sessão desconectada pelo WhatsApp: {reason_name} (on_connect={event.OnConnect})")
-    webui.set_error(
+    webui.set_disconnected(
         f"O WhatsApp encerrou a sessão salva ({reason_name}). Apague o arquivo "
         f"SESSION_DB e pareie de novo do zero."
     )
@@ -3207,7 +3208,7 @@ def handle_logged_out(event):
 def handle_temp_ban(event):
     _wa_ready.clear()
     print(f"🚫 Banimento temporário do WhatsApp: code={event.Code} expira={event.Expire}")
-    webui.set_error(
+    webui.set_disconnected(
         f"O WhatsApp aplicou um bloqueio temporário neste número/IP (code={event.Code}). "
         f"Espere e tente de novo mais tarde."
     )
@@ -3216,7 +3217,7 @@ def handle_temp_ban(event):
 def handle_client_outdated():
     _wa_ready.clear()
     print("📛 O WhatsApp recusou a conexão: versão do cliente (neonize/whatsmeow) desatualizada.")
-    webui.set_error(
+    webui.set_disconnected(
         "O WhatsApp recusou a conexão por versão de cliente desatualizada. "
         "Atualize o pacote neonize (pip install -U neonize) e reinicie o bot."
     )
@@ -3637,6 +3638,58 @@ def _run_connect(on_error=None):
                 pass
 
 
+# ---- Vigia de sobrevivência (self-healing) ---------------------------------
+# Problema real que isso resolve: a thread de reconexão (_connect_loop) só
+# tinha proteção contra falha DENTRO de client.connect() (via _run_connect).
+# Qualquer erro inesperado no resto do laço (ex.: webui.expire_code() falhar)
+# matava a thread em silêncio — o processo continuava de pé, o /health
+# respondia 200 do mesmo jeito, mas o WhatsApp nunca mais reconectava sozinho.
+# A única saída era reiniciar o serviço manualmente. Esse era o comportamento
+# que o usuário descrevia como "o Render reiniciar" — na prática o container
+# não tinha motivo pra reiniciar sozinho, então o bot ficava morto pra sempre.
+_conn_lock = threading.Lock()
+_conn_state = {
+    "last_ok": time.time(),   # última vez que houve progresso REAL (loop
+                               # iterando, QR recebido, ou conectado)
+    "loop_thread": None,      # referência viva da thread de reconexão atual
+    "restarts": [],           # timestamps em que o vigia teve que reviver
+                               # a thread (não conta reconexões normais)
+}
+
+# Sem sinal de progresso por tanto tempo E desconectado -> algo travou de
+# verdade (não é só "esperando o backoff").
+LIMITE_PARADO = 900       # 15 min
+# Se o vigia precisar reviver a thread mais vezes que isso dentro da janela,
+# não é um erro isolado — é um problema sistêmico que o retry interno não
+# resolve sozinho (ex.: alguma exceção que ocorre sempre logo no início).
+JANELA_CRASH = 600        # 10 min
+MAX_REVIVES_JANELA = 5
+# Cadência do vigia. É uma variável de módulo (não uma constante local dentro
+# de _supervisor) só para os testes conseguirem reduzi-la e não esperar 30s
+# de verdade a cada checagem.
+SUPERVISOR_INTERVAL_S = 30
+
+
+def _mark_alive():
+    with _conn_lock:
+        _conn_state["last_ok"] = time.time()
+
+
+def _should_be_healthy(conectado: bool, parado_ha: float, reincidencias: int) -> bool:
+    """Decide o resultado do /health. Função pura — fácil de testar sem
+    precisar montar threads/timers de verdade.
+
+    _start_connect_loop() e _supervisor() (que dependem desta função) são
+    definidos DENTRO de connect_web(), não aqui: eles precisam enxergar
+    _connect_loop, que é uma closure aninhada em connect_web — uma função no
+    nível de módulo não tem acesso a essa closure."""
+    if conectado:
+        return True
+    if reincidencias > MAX_REVIVES_JANELA:
+        return False
+    return parado_ha < LIMITE_PARADO
+
+
 def connect_with_paircode(number: str):
     """Conecta usando código de pareamento (em vez de QR), no terminal.
 
@@ -3680,27 +3733,45 @@ def connect_with_paircode(number: str):
     except Exception:
         pass
 
-    MAX_TENTATIVAS = 12
-    tentativa = 0
+    # Nunca desiste de vez — só desacelera. Isto roda na thread PRINCIPAL
+    # (chamado direto de main()), então qualquer erro que escapasse daqui sem
+    # try/except derrubaria o processo inteiro; e um `return` definitivo
+    # deixaria o bot morto pra sempre se o dono demorasse pra digitar o
+    # código, sem nenhum vigia pra reviver (esse existe só no modo web).
+    RECONEXAO_LENTA_APOS = 12
+    RECONEXAO_LENTA = 300
+    tentativa_pareamento = 0
+    tentativa_pos_pareamento = 0
+    avisou_lenta = False
     while True:
-        _wa_ready.clear()
-        # O código morre junto com a conexão que o emitiu, então a conexão nova
-        # precisa poder emitir outro — sem isto só UM código era gerado em toda
-        # a execução e o usuário ficava esperando um código já inválido.
-        ja_pedido.clear()
-        _run_connect()
-        if not _paired.is_set():
-            tentativa += 1
-            if tentativa >= MAX_TENTATIVAS:
-                print("⛔ Limite de reconexões atingido sem parear. Reinicie e tente de novo.")
-                return
-            espera = min(3 + tentativa * 2, 20)
-            print(f"🔄 Canal de QR expirou (socket caiu). Reconectando em {espera}s… "
-                  f"[{tentativa}/{MAX_TENTATIVAS}]")
-        else:
-            espera = min(5 + tentativa * 2, 30)
-            print(f"🔄 Conexão caiu (já pareado). Reconectando em {espera}s…")
-            tentativa += 1
+        try:
+            _wa_ready.clear()
+            # O código morre junto com a conexão que o emitiu, então a conexão
+            # nova precisa poder emitir outro — sem isto só UM código era
+            # gerado em toda a execução e o usuário esperava um já inválido.
+            ja_pedido.clear()
+            _run_connect()
+            if not _paired.is_set():
+                tentativa_pareamento += 1
+                if tentativa_pareamento > RECONEXAO_LENTA_APOS:
+                    if not avisou_lenta:
+                        avisou_lenta = True
+                        print(f"⏳ Sem parear depois de {RECONEXAO_LENTA_APOS} tentativas — "
+                              f"passo a tentar a cada {RECONEXAO_LENTA}s (sem desistir).")
+                    espera = RECONEXAO_LENTA
+                else:
+                    espera = min(3 + tentativa_pareamento * 2, 20)
+                    print(f"🔄 Canal de QR expirou (socket caiu). Reconectando em {espera}s… "
+                          f"[{tentativa_pareamento}/{RECONEXAO_LENTA_APOS}]")
+            else:
+                tentativa_pos_pareamento += 1
+                espera = min(5 + tentativa_pos_pareamento * 2, 30)
+                print(f"🔄 Conexão caiu (já pareado). Reconectando em {espera}s…")
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            print(f"⚠️ connect_with_paircode: erro inesperado (não derruba o processo): {exc}")
+            espera = 15
         time.sleep(espera)
 
 
@@ -3927,6 +3998,7 @@ def connect_web(number: str = ""):
         # Disparado pelo whatsmeow a cada renovação do QR. Quando chega, a
         # conexão está de pé e o PairPhone é aceito.
         _wa_ready.set()
+        _mark_alive()
         try:
             text = qr_data.decode() if isinstance(qr_data, (bytes, bytearray)) else str(qr_data)
             webui.set_qr(services.qr_png(text))
@@ -3961,56 +4033,155 @@ def connect_web(number: str = ""):
         pass
 
     def _on_connect_error(msg):
-        webui.set_error(
+        webui.set_disconnected(
             f"Falha ao conectar ao WhatsApp: {msg}. Se isso persistir, apague o "
             f"arquivo de sessão salvo (SESSION_DB) e tente parear de novo do zero."
         )
 
     def _connect_loop():
-        """Mantém a conexão WhatsApp viva indefinidamente.
+        """Mantém a conexão WhatsApp viva PARA SEMPRE — nunca desiste.
 
-        Fase 1 (antes de parear): reconecta até MAX_TENTATIVAS vezes ao expirar
-        o canal de QR — cada nova conexão deixa o QR disponível de novo.
+        Fase 1 (antes de parear): reconecta com backoff crescente até um teto
+        de RECONEXAO_LENTA_APOS tentativas; depois disso continua tentando,
+        só que numa cadência bem mais espaçada (RECONEXAO_LENTA), pra não
+        martelar o WhatsApp enquanto ninguém está olhando a página. Antes essa
+        fase desistia de vez (`return`) depois de 12 tentativas — se o dono
+        demorasse mais que ~10 minutos pra escanear/digitar o código, o bot
+        morria e só voltava reiniciando o serviço à mão.
 
         Fase 2 (depois de parear / sessão existente): se o socket cair,
-        reconecta automaticamente com backoff para retomar o recebimento de
-        mensagens, sem precisar reparear.
-        """
-        # Cada reconexão é um handshake novo com o WhatsApp. Poucas tentativas
-        # e backoff crescente: martelar o servidor é o caminho mais rápido para
-        # um bloqueio temporário do número/IP.
-        MAX_TENTATIVAS = 12
-        tentativa = 0
-        while True:
-            _wa_ready.clear()
-            _code_req.clear()  # a conexão nova pode emitir um código novo
-            _run_connect(_on_connect_error)
+        reconecta automaticamente com backoff, sem precisar reparear.
 
-            if not _paired.is_set():
-                # A conexão morreu: o código emitido por ela morreu junto. Tira
-                # da tela para o usuário não digitar um código já inválido — o
-                # próximo QR gera outro automaticamente.
-                webui.expire_code()
-                tentativa += 1
-                if tentativa >= MAX_TENTATIVAS:
-                    print("⛔ Limite de reconexões atingido sem parear.")
-                    webui.set_error(
-                        "Não consegui parear depois de várias tentativas. Reinicie o serviço "
-                        "para tentar de novo."
-                    )
-                    return
-                espera = min(5 + tentativa * 5, 60)
-                print(f"🔄 Canal de QR expirou (socket caiu). Reconectando em {espera}s… "
-                      f"[{tentativa}/{MAX_TENTATIVAS}]")
-            else:
-                # já estava pareado — reconecta automaticamente
-                espera = min(5 + tentativa * 2, 30)
-                print(f"🔄 Conexão caiu (já pareado). Reconectando em {espera}s…")
-                tentativa += 1
+        Todo o corpo do laço fica dentro de um try/except: um erro inesperado
+        aqui (não só dentro de client.connect(), que _run_connect já protege)
+        não pode matar esta thread — sem reconexão nunca mais aconteceria de
+        novo sozinha. Se mesmo assim a thread morrer, o vigia (_supervisor) a
+        revive.
+        """
+        RECONEXAO_LENTA_APOS = 12   # ~10 min de tentativas rápidas
+        RECONEXAO_LENTA = 300       # depois disso, 1 tentativa a cada 5 min
+        tentativa_pareamento = 0    # só cresce ANTES de parear pela 1ª vez
+        tentativa_pos_pareamento = 0  # só cresce DEPOIS de já ter pareado
+        avisou_lenta = False
+        while True:
+            try:
+                _mark_alive()
+                _wa_ready.clear()
+                _code_req.clear()  # a conexão nova pode emitir um código novo
+                _run_connect(_on_connect_error)
+
+                if not _paired.is_set():
+                    # A conexão morreu: o código emitido por ela morreu junto.
+                    # Tira da tela pro usuário não digitar um código já
+                    # inválido — o próximo QR gera outro automaticamente.
+                    webui.expire_code()
+                    tentativa_pareamento += 1
+                    if tentativa_pareamento > RECONEXAO_LENTA_APOS:
+                        if not avisou_lenta:
+                            avisou_lenta = True
+                            print(f"⏳ Sem parear depois de {RECONEXAO_LENTA_APOS} tentativas — "
+                                  f"passo a tentar a cada {RECONEXAO_LENTA}s (sem desistir).")
+                            webui.set_disconnected(
+                                "Ainda não pareado depois de várias tentativas. Continuo "
+                                "tentando em segundo plano — escaneie o QR ou peça o código "
+                                "quando quiser."
+                            )
+                        espera = RECONEXAO_LENTA
+                    else:
+                        espera = min(5 + tentativa_pareamento * 5, 60)
+                        print(f"🔄 Canal de QR expirou (socket caiu). Reconectando em {espera}s… "
+                              f"[{tentativa_pareamento}/{RECONEXAO_LENTA_APOS}]")
+                else:
+                    # já estava pareado — reconecta automaticamente, sempre.
+                    # O backoff cresce a cada queda e satura em 30s (não some:
+                    # fica ali como cadência estável enquanto a rede insistir
+                    # em cair, sem martelar o WhatsApp).
+                    tentativa_pos_pareamento += 1
+                    espera = min(5 + tentativa_pos_pareamento * 2, 30)
+                    print(f"🔄 Conexão caiu (já pareado). Reconectando em {espera}s…")
+            except Exception as exc:
+                import traceback
+                traceback.print_exc()
+                print(f"⚠️ _connect_loop: erro inesperado (não derruba a thread): {exc}")
+                espera = 15
             time.sleep(espera)
 
-    t = threading.Thread(target=_connect_loop, daemon=True)
-    t.start()
+    def _start_connect_loop():
+        """Sobe a thread que mantém a conexão com o WhatsApp viva.
+
+        Usada tanto no arranque quanto pelo vigia (_supervisor, logo abaixo)
+        para reviver, caso a thread anterior tenha morrido de forma
+        inesperada. Aninhada aqui dentro (não no nível do módulo) porque
+        precisa enxergar _connect_loop, que é uma closure local a esta
+        chamada de connect_web().
+        """
+        t = threading.Thread(target=_connect_loop, daemon=True)
+        with _conn_lock:
+            _conn_state["loop_thread"] = t
+        t.start()
+        return t
+
+    def _supervisor():
+        """Roda em paralelo à thread de reconexão, vigiando se ela segue viva.
+
+        Duas camadas de defesa, da mais rápida/barata pra mais lenta/cara:
+          1. Reviver a thread em processo, sem precisar de restart do
+             container (cobre o caso comum: um erro isolado matou a thread).
+          2. Se isso não bastar (crash-loop: a thread morre de novo repetidas
+             vezes), falha o /health — aí o Render reinicia o container
+             inteiro (healthCheckPath já configurado no render.yaml), último
+             recurso para problemas que o retry interno não resolve.
+        """
+        while True:
+            time.sleep(SUPERVISOR_INTERVAL_S)
+            try:
+                with _conn_lock:
+                    t = _conn_state["loop_thread"]
+                morta = t is None or not t.is_alive()
+
+                # Poda os revives velhos em TODA volta, não só quando a thread
+                # acaba de morrer de novo. Sem isso, um surto passageiro (a
+                # thread morre 6x numa rede instável e depois se estabiliza)
+                # deixava reincidencias travado acima do limite pra sempre —
+                # a poda só rodava dentro do `if morta`, que nunca mais era
+                # verdadeiro depois que a thread parava de cair. O vigia
+                # ficaria acusando crash-loop e derrubando o /health por um
+                # problema que já tinha se resolvido sozinho minutos antes.
+                agora = time.time()
+                with _conn_lock:
+                    _conn_state["restarts"] = [
+                        ts for ts in _conn_state["restarts"] if agora - ts < JANELA_CRASH
+                    ]
+                    if morta:
+                        _conn_state["restarts"].append(agora)
+                    reincidencias = len(_conn_state["restarts"])
+
+                if morta:
+                    print(f"🛡️ Vigia: thread de reconexão morreu (revive nº {reincidencias} "
+                          f"nos últimos {JANELA_CRASH // 60} min) — reiniciando.")
+                    _start_connect_loop()
+
+                conectado = False
+                try:
+                    with webui._lock:
+                        conectado = bool(webui._state["connected"])
+                except Exception:
+                    pass
+                with _conn_lock:
+                    parado_ha = time.time() - _conn_state["last_ok"]
+
+                saudavel = _should_be_healthy(conectado, parado_ha, reincidencias)
+                webui.set_health(saudavel)
+                if not saudavel:
+                    print(f"🚨 Vigia: sem progresso há {int(parado_ha)}s "
+                          f"(revives={reincidencias}/{JANELA_CRASH // 60}min) — "
+                          f"pedindo restart do container via /health.")
+            except Exception as exc:
+                # o vigia nunca pode morrer — sem ele, ninguém revive nada.
+                print(f"⚠️ Vigia: erro interno (ignorado, tenta de novo em 30s): {exc}")
+
+    _start_connect_loop()
+    threading.Thread(target=_supervisor, daemon=True).start()
 
     def _startup_watchdog():
         # Se depois de um tempo razoável nada apareceu (nem QR, nem erro, nem
@@ -4027,7 +4198,7 @@ def connect_web(number: str = ""):
             )
         if stuck:
             print("⚠️ 30s sem QR/código/erro — conexão pode estar travada.")
-            webui.set_error(
+            webui.set_disconnected(
                 "Demorando demais pra conectar ao WhatsApp (30s+ sem resposta). "
                 "Verifique os logs do servidor. Se persistir, pode ser sessão "
                 "corrompida — apague o arquivo SESSION_DB salvo e reinicie."
@@ -4035,7 +4206,13 @@ def connect_web(number: str = ""):
 
     threading.Thread(target=_startup_watchdog, daemon=True).start()
 
-    t.join()
+    # Mantém o processo principal vivo. Não dá join() numa thread específica
+    # porque o vigia (_supervisor) pode SUBSTITUIR a thread de reconexão se
+    # ela morrer — todas as threads daqui são daemon, então dar join numa
+    # referência antiga faria o processo inteiro encerrar assim que aquela
+    # thread em particular morresse, mesmo com uma nova já rodando no lugar.
+    while True:
+        time.sleep(3600)
 
 
 

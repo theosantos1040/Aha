@@ -31,6 +31,7 @@ _state = {
     "connected": False,  # já pareado com o WhatsApp?
     "error": None,
     "requesting": False,
+    "healthy": True,     # usado só pelo /health — ver set_health()
 }
 _bot_name = ["ThzyxBoTS"]
 _pair_callback = None    # func(numero: str) chamada quando o form é enviado
@@ -91,9 +92,49 @@ def set_connected():
 
 
 def set_error(msg: str):
+    """Publica um erro COSMÉTICO — não mexe em `connected`.
+
+    Usado por falhas do FORMULÁRIO de pareamento (número inválido, cooldown
+    do orçamento anti-bloqueio, "não consegui gerar o código"...), que podem
+    acontecer mesmo com o bot já conectado — ex.: alguém reenviando uma aba
+    antiga da página depois que o pareamento já deu certo. Se isso derrubasse
+    `connected`, a página passaria a mostrar "desconectado" para um bot que
+    está funcionando normalmente. Para uma queda de conexão DE VERDADE, use
+    set_disconnected().
+    """
     with _lock:
         _state["error"] = msg
         _state["requesting"] = False
+
+
+def set_disconnected(msg: str):
+    """Publica um erro E derruba `connected` — para quando o WhatsApp caiu
+    de fato (handle_disconnected, handle_stream_error, handle_logged_out...).
+
+    Sem isso, uma queda de conexão DEPOIS de já ter pareado deixava
+    `connected=True` para sempre: a página continuava mostrando "conectado"
+    mesmo com o WhatsApp fora do ar, e o vigia de sobrevivência
+    (bot._supervisor) usa esse mesmo campo para decidir se está tudo bem —
+    ficaria cego pro problema.
+    """
+    with _lock:
+        _state["error"] = msg
+        _state["requesting"] = False
+        _state["connected"] = False
+
+
+def set_health(ok: bool):
+    """Liga/desliga o resultado do /health.
+
+    Usado pelo vigia de sobrevivência (bot._supervisor) como ÚLTIMO recurso:
+    a reconexão em si já se recupera sozinha por dentro do processo, então só
+    chega a marcar healthy=False quando isso falhar repetidamente — aí vale
+    deixar o Render reiniciar o container inteiro (healthCheckPath: /health
+    no render.yaml), que pode limpar algum problema que o retry interno não
+    resolve (rede do container travada, etc.).
+    """
+    with _lock:
+        _state["healthy"] = ok
 
 
 def revoke_code():
@@ -343,7 +384,9 @@ class _Handler(BaseHTTPRequestHandler):
                 }
             self._send(200, "application/json", json.dumps(payload).encode("utf-8"))
         elif self.path == "/health":
-            self._send(200, "text/plain", b"ok")
+            with _lock:
+                ok = _state["healthy"]
+            self._send(200 if ok else 503, "text/plain", b"ok" if ok else b"unhealthy")
         else:
             self._send(404, "text/plain", b"not found")
 
