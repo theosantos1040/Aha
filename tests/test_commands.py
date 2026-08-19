@@ -5,6 +5,8 @@ bot.client, exercitando o roteamento e a maioria dos comandos offline.
 """
 import os
 import sys
+import threading
+import time
 import types
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -490,6 +492,9 @@ def test_ia_vision_image_search():
         return _real_png()
 
     orig = (bot.ai_vision, bot.ai_search, bot.ai_generate_image)
+    orig_cooldown = bot.IMAGE_COOLDOWN_SECONDS
+    bot.IMAGE_COOLDOWN_SECONDS = 0
+    bot._image_cooldowns.clear()
     bot.ai_vision, bot.ai_search, bot.ai_generate_image = fake_vision, fake_search, fake_gen
     try:
         # --- /analiseia com IMAGEM ---
@@ -520,6 +525,10 @@ def test_ia_vision_image_search():
 
         # --- /gerarimagem ---
         f = run("/gerarimagem um gato astronauta")
+        for _ in range(100):
+            if any(action[0] == "image" for action in f.actions):
+                break
+            time.sleep(0.01)
         assert chamadas["image"] == "um gato astronauta"
         assert ("image", "🎨 um gato astronauta") in f.actions
         assert "Uso:" in run("/gerarimagem").sent[0]
@@ -529,10 +538,79 @@ def test_ia_vision_image_search():
             raise ai_mod.AIError("sem créditos")
         bot.ai_generate_image = boom
         f = run("/gerarimagem x")
+        for _ in range(100):
+            if any("sem créditos" in message for message in f.sent):
+                break
+            time.sleep(0.01)
         assert "sem créditos" in f.sent[-1]
     finally:
         bot.ai_vision, bot.ai_search, bot.ai_generate_image = orig
+        bot.IMAGE_COOLDOWN_SECONDS = orig_cooldown
+        bot._image_cooldowns.clear()
     print("✓ IA visão/imagem/pesquisa (/analiseia /gerarimagem /pesquisa)")
+
+
+def test_gerarimagem_aplica_cooldown_sem_bloquear_handler():
+    gate = threading.Event()
+    started = threading.Event()
+
+    def slow_gen(prompt):
+        started.set()
+        gate.wait(timeout=2)
+        return _real_png()
+
+    original = bot.ai_generate_image
+    bot.ai_generate_image = slow_gen
+    bot._image_cooldowns.clear()
+    try:
+        first = run("/gerarimagem primeira")
+        assert started.wait(timeout=1), "worker não iniciou"
+
+        second = run("/gerarimagem segunda")
+        assert any("Aguarde" in message for message in second.sent)
+        assert not any(action[0] == "image" for action in second.actions)
+
+        gate.set()
+        for _ in range(100):
+            if any(action[0] == "image" for action in first.actions):
+                break
+            time.sleep(0.01)
+        assert any(action[0] == "image" for action in first.actions)
+    finally:
+        gate.set()
+        bot.ai_generate_image = original
+        bot._image_cooldowns.clear()
+
+
+def test_gerarimagem_libera_slot_se_thread_nao_iniciar(monkeypatch):
+    real_thread = bot.threading.Thread
+
+    class BrokenThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("sem thread")
+
+    bot._image_cooldowns.clear()
+    monkeypatch.setattr(bot.threading, "Thread", BrokenThread)
+    failed = run("/gerarimagem teste")
+    assert any("Não consegui iniciar" in message for message in failed.sent)
+
+    # Se o rollback falhar, a próxima tentativa cairá no cooldown ou em lotação.
+    monkeypatch.setattr(bot.threading, "Thread", real_thread)
+    original = bot.ai_generate_image
+    bot.ai_generate_image = lambda prompt: _real_png()
+    try:
+        success = run("/gerarimagem teste 2")
+        for _ in range(100):
+            if any(action[0] == "image" for action in success.actions):
+                break
+            time.sleep(0.01)
+        assert any(action[0] == "image" for action in success.actions)
+    finally:
+        bot.ai_generate_image = original
+        bot._image_cooldowns.clear()
 
 
 def test_vision_on_mention():
