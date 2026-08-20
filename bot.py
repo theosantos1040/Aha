@@ -659,6 +659,10 @@ def cmd_backup_load(ctx):
     if not ctx.parts or not ctx.parts[0].isdigit():
         return ctx.reply("Uso: /backup-load <id_backup>")
     bid = int(ctx.parts[0])
+    if bid > db.SQLITE_MAX_INT:
+        # nenhum id real chega perto disso — trata como "não encontrado" em
+        # vez de deixar o SQLite levantar OverflowError no bind do parâmetro
+        return ctx.reply(f"❌ Backup #{bid} não encontrado neste grupo.")
     row = db.backup_get(ctx.chat_str, bid)
     if not row:
         return ctx.reply(f"❌ Backup #{bid} não encontrado neste grupo.")
@@ -726,18 +730,39 @@ def cmd_ia(ctx):
         client.send_chat_presence(ctx.chat, 0, 0)  # "digitando"
     except Exception:
         pass
-    # modo pensamento: mostra o raciocínio antes da resposta
-    if cfg["thinking"]:
-        ctx.reply("🧠 Analisando a mensagem...")
-        time.sleep(5)
-        ctx.reply("🧠 Entendi sua pergunta. Gerando a melhor resposta...")
-    try:
-        answer = ai_chat(prompt, model_key, mode=cfg["mode"],
-                         name=cfg["name"], bio=cfg["bio"] or None)
-        deco = f"𓊆ྀི {cfg['name']} ❤︎𓊇 ◡̈"
-        ctx.reply(f"{deco} ({model_key})\n{config.DECO_LINE}\n\n{answer}")
-    except AIError as exc:
-        ctx.reply(f"❌ IA indisponível: {exc}")
+
+    target_client = client
+    target_chat = ctx.chat
+    target_message = ctx.msg
+
+    def reply(text):
+        try:
+            target_client.reply_message(text, target_message, to=target_chat)
+        except Exception:
+            target_client.send_message(target_chat, text)
+
+    def responder():
+        # O dispatcher de eventos do neonize é ÚNICO e SÍNCRONO — não existe
+        # thread pool por evento, então qualquer bloqueio aqui dentro trava
+        # TODOS os chats do bot, não só este. Antes, "modo pensamento" fazia
+        # um time.sleep(5) direto no handler (puro efeito cosmético, sem
+        # trabalho real) e travava o bot inteiro por 5s a cada /ia com
+        # /thinking on — e a chamada de rede de ai_chat logo em seguida já
+        # bloqueava de qualquer forma. Roda tudo numa thread própria, no
+        # mesmo padrão já usado por /gerarimagem.
+        if cfg["thinking"]:
+            reply("🧠 Analisando a mensagem...")
+            time.sleep(5)
+            reply("🧠 Entendi sua pergunta. Gerando a melhor resposta...")
+        try:
+            answer = ai_chat(prompt, model_key, mode=cfg["mode"],
+                             name=cfg["name"], bio=cfg["bio"] or None)
+            deco = f"𓊆ྀི {cfg['name']} ❤︎𓊇 ◡̈"
+            reply(f"{deco} ({model_key})\n{config.DECO_LINE}\n\n{answer}")
+        except AIError as exc:
+            reply(f"❌ IA indisponível: {exc}")
+
+    threading.Thread(target=responder, daemon=True).start()
 
 
 # ─────────── IA: visão, imagem e pesquisa ───────────
@@ -1287,9 +1312,23 @@ def cmd_balance(ctx):
 
 def cmd_pay(ctx):
     target = ctx.target_jid_str()
+    if not target:
+        return ctx.reply("Uso: /pay @usuario <valor>")
+    # Quando o alvo vem de um número cru em ctx.parts (sem @menção — é assim
+    # que target_jid_str() acha o primeiro token com 8+ dígitos), esse MESMO
+    # token também satisfazia p.isdigit() e virava, ao mesmo tempo, o "valor"
+    # da transferência. Bastava esquecer de digitar o valor pra /pay usar o
+    # próprio telefone do alvo como quantia — e a transferência acontecia de
+    # verdade se o saldo desse. Ignora aqui o token já consumido como alvo.
+    ignorar_como_valor = set()
+    if not ctx.mentions:
+        for p in ctx.parts:
+            if len("".join(c for c in p if c.isdigit())) >= 8:
+                ignorar_como_valor.add(p)
+                break
     nums = [int("".join(c for c in p if c.isdigit())) for p in ctx.parts
-            if p.isdigit()]
-    if not target or not nums:
+            if p.isdigit() and p not in ignorar_como_valor]
+    if not nums:
         return ctx.reply("Uso: /pay @usuario <valor>")
     amount = nums[-1]
     ok, msg = db.transfer(ctx.sender_str, target, amount)
@@ -1324,6 +1363,14 @@ def cmd_roll(ctx):
             sides = int(s) if s.isdigit() else 6
         elif ctx.parts[0].isdigit():
             sides = int(ctx.parts[0])
+    # games.roll() já limita sides (2-1000) e count (1-20) por dentro, mas só
+    # devolve os resultados — sem clampar aqui também, o RÓTULO da mensagem
+    # mostrava o valor digitado (ex.: "50d6") mesmo quando só 20 dados eram
+    # realmente sorteados, ou "1d1500" quando o dado usado de verdade tinha
+    # só 1000 lados. Os mesmos limites de games.roll(), repetidos aqui só
+    # para exibir um rótulo condizente com o resultado real.
+    sides = max(2, min(sides, 1000))
+    count = max(1, min(count, 20))
     rolls, total = games.roll(sides, count)
     ctx.reply(f"🎲 Rolagem ({count}d{sides}): {rolls} = *{total}*")
 
@@ -1379,9 +1426,12 @@ def cmd_tictactoe(ctx):
 def cmd_trivia(ctx):
     g = _active_games.get(ctx.chat_str)
     if g and g.get("type") == "trivia":
+        # encerra a rodada SEMPRE que alguém responde (certo ou errado) —
+        # antes, errar revelava a resposta certa na mensagem sem remover o
+        # jogo, e reenviar essa mesma resposta virava as 50 moedas de graça
+        _active_games.pop(ctx.chat_str, None)
         if ctx.args.strip().lower() == g["answer"].lower():
             db.add_balance(ctx.sender_str, 50)
-            _active_games.pop(ctx.chat_str, None)
             return ctx.reply("✅ Correto! +50 moedas 🎉")
         return ctx.reply(f"❌ Errado! A resposta era: *{g['answer']}*")
     q = games.new_trivia()
@@ -1493,16 +1543,22 @@ def cmd_tempban(ctx):
     target = ctx.target_jid_str()
     if not target:
         return ctx.reply("Uso: /tempban @user <duração ex:1h>")
-    secs = utils.parse_duration(ctx.parts[-1]) if ctx.parts else 0
-    secs = secs or 3600
+    # Só trata o ÚLTIMO argumento como duração se ele vier SEPARADO do alvo.
+    # Com um único token (ex.: "/tempban 5511999999999"), esse token é o
+    # próprio alvo — reusá-lo como "duração" caía no fallback "número puro =
+    # minutos" de parse_duration e multiplicava o telefone inteiro por 60,
+    # gerando um ban de milhões de anos (e a mensagem mostrava o telefone
+    # como se fosse a duração).
+    duracao_texto = ctx.parts[-1] if len(ctx.parts) >= 2 else "1h"
+    secs = utils.parse_duration(duracao_texto) or 3600
     phone = short_jid(target)
     db.add_ban(ctx.chat_str, phone)
     try:
         client.update_group_participants(ctx.chat, [parse_jid(target)], ParticipantChange.REMOVE)
     except Exception:
         pass
-    audit(ctx.chat, ctx.chat_str, ctx.sender_str, "tempban", f"{phone} {ctx.parts[-1]}")
-    ctx.reply(f"⛔ @{phone} banido temporariamente ({ctx.parts[-1]}).")
+    audit(ctx.chat, ctx.chat_str, ctx.sender_str, "tempban", f"{phone} {duracao_texto}")
+    ctx.reply(f"⛔ @{phone} banido temporariamente ({duracao_texto}).")
     _schedule(secs, lambda: db.remove_ban(ctx.chat_str, phone))
 
 
@@ -1836,9 +1892,13 @@ def cmd_guessnumber(ctx):
 def cmd_mathrace(ctx):
     g = _active_games.get(ctx.chat_str)
     if g and g.get("type") == "math":
+        # encerra a rodada SEMPRE que alguém responde (certo, errado ou
+        # vazio) — antes, uma resposta errada/vazia revelava o valor exato
+        # sem remover o jogo, e reenviar esse valor revelado virava as 35
+        # moedas de graça, sem nunca ter resolvido a conta.
+        _active_games.pop(ctx.chat_str, None)
         try:
             if int(ctx.args.strip()) == g["ans"]:
-                _active_games.pop(ctx.chat_str, None)
                 db.add_balance(ctx.sender_str, 35)
                 return ctx.reply("✅ Correto! +35 moedas ⚡")
         except ValueError:
@@ -1852,8 +1912,13 @@ def cmd_mathrace(ctx):
 def _guess_game(ctx, kind, emoji, titulo):
     g = _active_games.get(ctx.chat_str)
     if g and g.get("type") == kind:
+        # encerra a rodada SEMPRE que alguém responde — antes, uma tentativa
+        # errada revelava a resposta certa sem remover o jogo, e reenviar
+        # essa resposta revelada virava as 40 moedas de graça (mesmo bug em
+        # /guessflag, /guesspokemon e /guessanime, que compartilham esta
+        # função).
+        _active_games.pop(ctx.chat_str, None)
         if ctx.args.strip().lower() == g["answer"]:
-            _active_games.pop(ctx.chat_str, None)
             db.add_balance(ctx.sender_str, 40)
             return ctx.reply(f"✅ Isso! Era *{g['answer'].title()}*. +40 moedas 🎉")
         return ctx.reply(f"❌ Não! A resposta era *{g['answer'].title()}*.")
@@ -2271,6 +2336,19 @@ def cmd_recortar(ctx):
 
 
 def _speed_operation(ctx, operation, default_factor):
+    # Valida o fator ANTES de tocar em mídia, num try/except isolado — igual
+    # a cmd_girar/cmd_blur/cmd_pixelar. Antes, o float() ficava no MESMO
+    # try/except da chamada de mídia, então um fator inválido (ex.: "abc",
+    # emoji, texto de injeção SQL) vazava a exceção crua do Python
+    # ("could not convert string to float: 'abc'"), em vez de uma mensagem
+    # amigável em português.
+    try:
+        factor = float(ctx.parts[0]) if ctx.parts else default_factor
+    except ValueError:
+        return ctx.reply(
+            f"Uso: /{ctx.command} [fator de {media.FACTOR_MIN:g} a {media.FACTOR_MAX:g}] "
+            f"(ex.: /{ctx.command} 2)"
+        )
     data, kind = _ctx_media(
         ctx, {"audio", "video"},
         f"Uso: envie ou responda a áudio/vídeo com /{ctx.command} [fator].",
@@ -2278,10 +2356,9 @@ def _speed_operation(ctx, operation, default_factor):
     if not data:
         return
     try:
-        factor = float(ctx.parts[0]) if ctx.parts else default_factor
         result = operation(data, kind, factor)
         _send_processed(ctx, result, kind, f"✅ /{ctx.command} {factor:g}x concluído.")
-    except (ValueError, media.MediaError) as exc:
+    except media.MediaError as exc:
         ctx.reply(f"❌ {exc}")
 
 
@@ -2518,7 +2595,12 @@ def cmd_antifake(ctx):
         return
     action = ctx.parts[0].casefold() if ctx.parts else ""
     if action in ("on", "ativar", "ligar"):
-        ddi = "".join(c for c in (ctx.parts[1] if len(ctx.parts) > 1 else "55") if c.isdigit())
+        # "0123456789" em vez de c.isdigit(): str.isdigit() do Python aceita
+        # dígitos Unicode não-ASCII (ex.: ١ árabe-índico), que nenhum telefone
+        # real usa. Aceitar isso salvava um DDI que NUNCA bate com
+        # phone.startswith(...) — o antifake virava um filtro que expulsava
+        # QUALQUER novo membro, mesmo com DDI +55 correto.
+        ddi = "".join(c for c in (ctx.parts[1] if len(ctx.parts) > 1 else "55") if c in "0123456789")
         if not 1 <= len(ddi) <= 3:
             return ctx.reply("Uso: /antifake on [DDI permitido] (ex.: /antifake on 55)")
         db.set_setting(ctx.chat_str, "antifake", "1")
@@ -2595,7 +2677,12 @@ def cmd_lembretes(ctx):
 def cmd_cancelarlembrete(ctx):
     if not ctx.parts or not ctx.parts[0].isdigit():
         return ctx.reply("Uso: /cancelarlembrete <id> (consulte /lembretes)")
-    ok = db.cancel_reminder(int(ctx.parts[0]), ctx.sender_str, ctx.chat_str)
+    rid = int(ctx.parts[0])
+    if rid > db.SQLITE_MAX_INT:
+        # nenhum id real chega perto disso — trata como "não encontrado" em
+        # vez de deixar o SQLite levantar OverflowError no bind do parâmetro
+        return ctx.reply("❌ Lembrete ativo não encontrado ou não pertence a você.")
+    ok = db.cancel_reminder(rid, ctx.sender_str, ctx.chat_str)
     ctx.reply("✅ Lembrete cancelado." if ok else "❌ Lembrete ativo não encontrado ou não pertence a você.")
 
 

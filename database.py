@@ -15,6 +15,14 @@ import config
 _lock = threading.RLock()
 _conn = None
 
+# Maior valor que cabe no INTEGER de 64 bits do SQLite. Um id/duração digitado
+# por engano com dezenas de dígitos (ex.: "/backup-load 99999999999999999999")
+# faz o driver sqlite3 levantar OverflowError na hora de fazer o bind do
+# parâmetro — _exec() converte isso numa exceção comum abaixo, então quem
+# valida esse tipo de entrada nos comandos também pode reaproveitar esta
+# constante para recusar o valor ANTES de gastar uma consulta.
+SQLITE_MAX_INT = 2 ** 63 - 1
+
 # Catálogo padrão da loja (/loja e /comprar). Só é inserido se ainda não existir.
 SHOP_DEFAULT = [
     ("cafe", "Café", 50, "Restaura o ânimo para trabalhar."),
@@ -133,7 +141,16 @@ def init(path: str = None):
 
 def _exec(query, params=(), fetch=None):
     with _lock:
-        cur = _conn.execute(query, params)
+        try:
+            cur = _conn.execute(query, params)
+        except OverflowError as exc:
+            # Um parâmetro inteiro maior que SQLITE_MAX_INT (ex.: um id ou
+            # duração digitado com dezenas de dígitos) faz o driver sqlite3
+            # levantar OverflowError crua na hora do bind — sem isso, ela
+            # vazava até o usuário via o catch-all genérico de
+            # handle_command como "Python int too large to convert to SQLite
+            # INTEGER". Convertida aqui, uma vez só, para qualquer chamador.
+            raise ValueError("número muito grande — verifique o valor informado.") from exc
         if fetch == "one":
             row = cur.fetchone()
             _conn.commit()

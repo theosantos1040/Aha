@@ -394,9 +394,11 @@ def _check_factor(factor) -> float:
             f"fator inválido: use um número de {FACTOR_MIN:g} a {FACTOR_MAX:g}."
         ) from exc
     if not math.isfinite(factor) or not (FACTOR_MIN <= factor <= FACTOR_MAX):
+        # Mensagem SEM citar um comando específico: esta função é usada tanto
+        # por /acelerar quanto por /lentidao (speed_up_media/slow_down_media),
+        # e citar sempre "/acelerar" aqui confundia quem tinha chamado /lentidao.
         raise MediaError(
-            f"fator fora do limite: use de {FACTOR_MIN:g} a {FACTOR_MAX:g} "
-            "(ex.: /acelerar 2)."
+            f"fator fora do limite: use um valor de {FACTOR_MIN:g} a {FACTOR_MAX:g}."
         )
     return factor
 
