@@ -22,6 +22,36 @@ class AIError(Exception):
     pass
 
 
+# Free tier da OpenRouter: 20 pedidos/minuto e 50/dia (1000/dia com $10+ em
+# créditos comprados) — COMPARTILHADO entre TODOS os modelos ":free" da
+# mesma conta. Isso explica o sintoma "a IA responde uma vez e depois some":
+# a primeira mensagem consome 1 do orçamento diário; quando outras pessoas
+# (ou os próprios testes) também usam /ia, /pesquisa, /analiseia etc., o
+# limite estoura rápido e toda chamada seguinte recebe 429 até resetar.
+RATE_LIMIT_HELP = (
+    "O limite gratuito da OpenRouter foi atingido (20 pedidos/min ou 50/dia "
+    "sem créditos comprados — some entre TODOS os modelos \":free\" da conta). "
+    "Aguarde alguns minutos, ou adicione créditos em openrouter.ai/credits "
+    "para subir o limite diário para 1000."
+)
+
+
+def _parece_rate_limit(msg: str) -> bool:
+    m = (msg or "").lower()
+    return "429" in m or "rate limit" in m or "rate-limit" in m
+
+
+def _erro_final(erros: list, generico: str) -> AIError:
+    """Monta o erro depois que TODOS os modelos da cadeia falharam.
+
+    Se todas as falhas cheiram a rate-limit, a mensagem genérica ("todos os
+    modelos falharam, tente de novo") esconde a causa real e faz parecer bug.
+    """
+    if erros and all(_parece_rate_limit(e) for e in erros):
+        return AIError(RATE_LIMIT_HELP)
+    return AIError(generico)
+
+
 def _system_prompt(mode: str = None, name: str = None, bio: str = None) -> str:
     name = name or config.BOT_NAME
     base = (
@@ -93,11 +123,19 @@ def _request(payload: dict, timeout: int, want) -> object:
             continue
 
         if resp.status_code in (429, 500, 502, 503, 504):
-            last_err = f"HTTP {resp.status_code}"
+            try:
+                err_body = resp.json().get("error", {}) or {}
+            except Exception:
+                err_body = {}
+            # Guarda a mensagem REAL da OpenRouter, não só o código HTTP — no
+            # 429 ela costuma dizer explicitamente que é limite de free-tier
+            # (20 pedidos/min, ou 50/dia sem créditos comprados), informação
+            # que se perdia e virava um genérico "IA indisponível" confuso.
+            err_msg = str(err_body.get("message") or "").strip()
+            last_err = f"HTTP {resp.status_code}" + (f": {err_msg}" if err_msg else "")
             try:
                 retry_after = float(
-                    resp.json().get("error", {}).get("metadata", {})
-                    .get("retry_after_seconds", 2 ** attempt)
+                    err_body.get("metadata", {}).get("retry_after_seconds", 2 ** attempt)
                 )
             except Exception:
                 retry_after = 2 ** attempt
@@ -137,18 +175,21 @@ def chat(prompt: str, model_key: str = None, history: list = None,
 
     # tenta o modelo pedido; se falhar de vez, cai para os outros
     tried = [model_id]
+    erros = []
     try:
         return _call_model(model_id, messages, DEFAULT_TIMEOUT)
-    except AIError:
+    except AIError as exc:
+        erros.append(str(exc))
         for key, mid in config.AI_MODELS.items():
             if mid in tried:
                 continue
             tried.append(mid)
             try:
                 return _call_model(mid, messages, DEFAULT_TIMEOUT)
-            except AIError:
+            except AIError as exc2:
+                erros.append(str(exc2))
                 continue
-    raise AIError("Todos os modelos de IA falharam no momento. Tente novamente.")
+    raise _erro_final(erros, "Todos os modelos de IA falharam no momento. Tente novamente.")
 
 
 # ===================== VISÃO (analisar imagem) =====================
@@ -193,7 +234,9 @@ def vision(prompt: str, image_bytes: bytes, mode: str = None,
         except AIError as exc:
             erros.append(f"{model_id}: {exc}")
             continue
-    raise AIError("Nenhum modelo de visão respondeu. " + " | ".join(erros[:2]))
+    raise _erro_final(
+        erros, "Nenhum modelo de visão respondeu. " + " | ".join(erros[:2])
+    )
 
 
 # ===================== PESQUISA =====================
@@ -263,7 +306,9 @@ def transcribe(audio_bytes: bytes, language: str = "pt") -> str:
         except AIError as exc:
             erros.append(f"{model_id}: {exc}")
             continue
-    raise AIError("Nenhum modelo conseguiu transcrever. " + " | ".join(erros[:2]))
+    raise _erro_final(
+        erros, "Nenhum modelo conseguiu transcrever. " + " | ".join(erros[:2])
+    )
 
 
 # ===================== GERAÇÃO DE IMAGEM (Hugging Face) =====================
